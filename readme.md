@@ -8,6 +8,12 @@
 pip3 install -r requirements.txt
 ```
 
+Using uv:
+
+```
+uv sync
+```
+
 Code running with Python3.12.
 
 ## Install Brax
