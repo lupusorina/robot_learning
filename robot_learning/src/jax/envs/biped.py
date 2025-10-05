@@ -476,8 +476,8 @@ class Biped(mjx_env.MjxEnv):
     state.info["xfrc_applied"] = data.xfrc_applied
     state.info["qpos"] = data.qpos
     state.info["qvel"] = data.qvel
-    linvel_B = self._get_sensor_data(data, LOCAL_LINVEL_SENSOR)
-    state.info["linvel_B"] = linvel_B
+    # linvel_B = self._get_sensor_data(data, LOCAL_LINVEL_SENSOR)
+    # state.info["linvel_B"] = linvel_B
 
     done = done.astype(reward.dtype)
     state = state.replace(data=data, obs=obs, reward=reward, done=done)

@@ -1,8 +1,8 @@
 matplotlib
 mediapy
 brax
-jax
-#jax[cuda12]
+# jax # no GPU
+jax[cuda12] # use if you have a GPU
 # brax==0.12.3
 # jax[cuda12]==0.5.1
 imageio
