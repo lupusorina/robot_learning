@@ -367,6 +367,7 @@ class Biped(mjx_env.MjxEnv):
         "xfrc_applied": data.xfrc_applied,
         # Initialize action history
         "action_history": jp.zeros((self._config.action_delay + 1, self.mjx_model.nu)),
+        "linvel_B": jp.array([0.0, 0.0, 0.0])
     }
 
     # Initialize the metrics.
