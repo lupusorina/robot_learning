@@ -3,6 +3,9 @@ import subprocess
 import numpy as np
 np.set_printoptions(precision=3, suppress=True, linewidth=100)
 
+# Set MuJoCo to use EGL rendering to avoid GLX issues
+os.environ['MUJOCO_GL'] = 'egl'
+
 from datetime import datetime
 import functools
 from brax.training.agents.ppo import networks as ppo_networks
@@ -15,9 +18,11 @@ from robot_learning.src.jax.wrapper import wrap_for_brax_training
 import jax
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint
 
+
 from robot_learning.src.jax.utils import draw_joystick_command
 import time
 import robot_learning.src.jax.envs.biped as bb
+
 from etils import epath
 import jax
 from jax import numpy as jp
@@ -47,22 +52,31 @@ print("Available devices:", jax.devices())
 
 # Brax PPO config.
 brax_ppo_config = config_dict.create(
-      num_timesteps=200_000_000,
+      num_timesteps=200_000_000, #original testing timestamp
+      # num_timesteps=1000,  # Small number for debugging
+      # num_evals=2,  # Reduced from 15
       num_evals=15,
       reward_scaling=1.0,
       clipping_epsilon=0.2,
       num_resets_per_eval=1,
-      episode_length=1000,
+      # episode_length=100,  # Reduced from 1000
+      episode_length=1000,  # Reduced from 1000
       normalize_observations=True,
       action_repeat=1,
-      unroll_length=20,
-      num_minibatches=32,
-      num_updates_per_batch=4,
+      # unroll_length=10,  # Reduced from 20
+      # num_minibatches=8,  # Reduced from 32
+      # num_updates_per_batch=2,  # Reduced from 4
+      unroll_length=20,  # Reduced from 20
+      num_minibatches=32,  # Reduced from 32
+      num_updates_per_batch=4,  # Reduced from 4
       discounting=0.97,
       learning_rate=3e-4,
       entropy_cost=0.005,
-      num_envs=8192,
-      batch_size=256,
+      # num_envs=128,  # Reduced from 8192
+      # batch_size=64,  # Reduced from 256
+
+      num_envs=8192,  # Reduced from 8192
+      batch_size=256,  # Reduced from 256
       max_grad_norm=1.0,
       network_factory = config_dict.create(
         policy_hidden_layer_sizes=(512, 256, 128),
@@ -135,21 +149,43 @@ print(f"time to train: {times[-1] - times[1]}")
 # Testing: load the latest weights and test the policy.
 RESULTS_FOLDER_PATH = os.path.abspath('results')
 
-# Sort by date and get the latest folder.
-folders = sorted(os.listdir(RESULTS_FOLDER_PATH))
-latest_folder = folders[-1]
+# Sort by date and get the latest folder that has checkpoints
+all_folders = sorted(os.listdir(RESULTS_FOLDER_PATH))
+# Filter to only include folders that have checkpoint directories
+valid_folders = []
+for folder in all_folders:
+    folder_path = epath.Path(RESULTS_FOLDER_PATH) / folder
+    if os.path.isdir(folder_path):
+        # Check if this folder has any checkpoint directories
+        subdirs = [d for d in os.listdir(folder_path) if os.path.isdir(folder_path / d)]
+        checkpoint_dirs = [d for d in subdirs if os.path.exists(folder_path / d / '_CHECKPOINT_METADATA')]
+        if checkpoint_dirs:
+            valid_folders.append(folder)
 
-# In the latest folder, find the latest folder, ignore the files.
-folders = sorted(os.listdir(epath.Path(RESULTS_FOLDER_PATH) / latest_folder))
-folders = [f for f in folders if os.path.isdir(epath.Path(RESULTS_FOLDER_PATH) / latest_folder / f)]
+if not valid_folders:
+    print("No valid checkpoint folders found!")
+    exit(1)
+
+latest_folder = valid_folders[-1]
+print(f'Using checkpoint folder: {latest_folder}')
+
+# In the latest folder, find the latest checkpoint folder
+checkpoint_folders = sorted(os.listdir(epath.Path(RESULTS_FOLDER_PATH) / latest_folder))
+checkpoint_folders = [f for f in checkpoint_folders if os.path.isdir(epath.Path(RESULTS_FOLDER_PATH) / latest_folder / f)]
+checkpoint_folders = [f for f in checkpoint_folders if os.path.exists(epath.Path(RESULTS_FOLDER_PATH) / latest_folder / f / '_CHECKPOINT_METADATA')]
+
+if not checkpoint_folders:
+    print(f"No checkpoint directories found in {latest_folder}")
+    exit(1)
 
 policy_fn_list = []
 policy_folder_list = []
 
 USE_LATEST_WEIGHTS = True
 if USE_LATEST_WEIGHTS:
-  latest_weights_folder = folders[-1]
+  latest_weights_folder = checkpoint_folders[-1]
   print(f'Latest weights folder: {latest_weights_folder}')
+  print(f'Loading from: {RESULTS_FOLDER_PATH}/{latest_folder}/{latest_weights_folder}')
   policy_fn = ppo_checkpoint.load_policy(epath.Path(RESULTS_FOLDER_PATH) / latest_folder / latest_weights_folder)
   policy_fn_list.append(policy_fn)
   policy_folder_list.append(latest_weights_folder)
@@ -219,29 +255,36 @@ for policy_fn, folder in zip(policy_fn_list, policy_folder_list):
     )
     time_diff = time.time() - time_duration
 
-  render_every = 1
-  fps = 1.0 / eval_env.ctrl_dt / render_every
-  print(f"fps: {fps}")
-  traj = rollout[::render_every]
-  mod_fns = modify_scene_fns[::render_every]
+  # Try to render video with error handling
+  try:
+    render_every = 1
+    fps = 1.0 / eval_env.ctrl_dt / render_every
+    print(f"fps: {fps}")
+    traj = rollout[::render_every]
+    mod_fns = modify_scene_fns[::render_every]
 
-  scene_option = mujoco.MjvOption()
-  scene_option.geomgroup[2] = True
-  scene_option.geomgroup[3] = False
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
-  scene_option.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = False
+    scene_option = mujoco.MjvOption()
+    scene_option.geomgroup[2] = True
+    scene_option.geomgroup[3] = False
+    scene_option.flags[mujoco.mjtVisFlag.mjVIS_CONTACTPOINT] = True
+    scene_option.flags[mujoco.mjtVisFlag.mjVIS_TRANSPARENT] = False
+    scene_option.flags[mujoco.mjtVisFlag.mjVIS_PERTFORCE] = False
 
-  frames = eval_env.render(
-      traj,
-      camera="track",
-      scene_option=scene_option,
-      width=640,
-      height=480,
-      modify_scene_fns=mod_fns,
-  )
+    print("Attempting to render video...")
+    frames = eval_env.render(
+        traj,
+        camera="track",
+        scene_option=scene_option,
+        width=640,
+        height=480,
+        modify_scene_fns=mod_fns,
+    )
 
-  # media.show_video(frames, fps=fps, loop=False)
-  ABS_FOLDER_RESUlTS = epath.Path(RESULTS_FOLDER_PATH) / latest_folder
-  media.write_video(f'{ABS_FOLDER_RESUlTS}/joystick_testing_{folder}_xvel_{x_vel}_yvel_{y_vel}_yawvel_{yaw_vel}.mp4', frames, fps=fps)
-  print('Video saved')
+    # media.show_video(frames, fps=fps, loop=False)
+    ABS_FOLDER_RESUlTS = epath.Path(RESULTS_FOLDER_PATH) / latest_folder
+    media.write_video(f'{ABS_FOLDER_RESUlTS}/joystick_testing_{folder}_xvel_{x_vel}_yvel_{y_vel}_yawvel_{yaw_vel}.mp4', frames, fps=fps)
+    print('Video saved successfully!, ')
+    print(f'Located at: {ABS_FOLDER_RESUlTS}/joystick_testing_{folder}_xvel_{x_vel}_yvel_{y_vel}_yawvel_{yaw_vel}.mp4')
+  except Exception as e:
+    print(f"Rendering failed: {e}")
+    print("Continuing without video generation...")
