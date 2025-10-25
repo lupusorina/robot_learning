@@ -52,31 +52,22 @@ print("Available devices:", jax.devices())
 
 # Brax PPO config.
 brax_ppo_config = config_dict.create(
-      num_timesteps=200_000_000, #original testing timestamp
-      # num_timesteps=1000,  # Small number for debugging
-      # num_evals=2,  # Reduced from 15
+      num_timesteps=200_000_000,
       num_evals=15,
       reward_scaling=1.0,
       clipping_epsilon=0.2,
       num_resets_per_eval=1,
-      # episode_length=100,  # Reduced from 1000
-      episode_length=1000,  # Reduced from 1000
+      episode_length=1000,
       normalize_observations=True,
       action_repeat=1,
-      # unroll_length=10,  # Reduced from 20
-      # num_minibatches=8,  # Reduced from 32
-      # num_updates_per_batch=2,  # Reduced from 4
-      unroll_length=20,  # Reduced from 20
-      num_minibatches=32,  # Reduced from 32
-      num_updates_per_batch=4,  # Reduced from 4
+      unroll_length=20,
+      num_minibatches=32,
+      num_updates_per_batch=4,  
       discounting=0.97,
       learning_rate=3e-4,
       entropy_cost=0.005,
-      # num_envs=128,  # Reduced from 8192
-      # batch_size=64,  # Reduced from 256
-
-      num_envs=8192,  # Reduced from 8192
-      batch_size=256,  # Reduced from 256
+      num_envs=8192,
+      batch_size=256,
       max_grad_norm=1.0,
       network_factory = config_dict.create(
         policy_hidden_layer_sizes=(512, 256, 128),
