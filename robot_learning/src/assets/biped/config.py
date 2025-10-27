@@ -20,15 +20,15 @@ GYRO_SENSOR = "gyro"
 IMU_SITE = "imu_location"
 DESIRED_HEIGHT = 0.56
 
-HIP_JOINT_NAMES = ["YAW", "HAA", "HFE"]
+HIP_JOINT_NAMES = ["HAA", "HFE"]
 KNEE_JOINT_NAMES = ["KFE"]
-ANKLE_FE_JOINT_NAMES = ["ANKLE"]
-# ANKLE_FE_JOINT_NAMES = []
+# ANKLE_FE_JOINT_NAMES = ["ANKLE"]
+ANKLE_FE_JOINT_NAMES = []
 ANKLE_AA_JOINT_NAMES = []
 
 SIDES = ["L", "R"]
 
-                    # L_YAW L_HAA L_HFE L_KFE L_ANKLE
-                    # R_YAW R_HAA R_HFE R_KFE R_ANKLE
-COSTS_JOINT_ANGLES = [1.0, 1.0, 0.01, 0.01, 1.0,  # left leg.
-                      1.0, 1.0, 0.01, 0.01, 1.0]  # right leg.
+                    # L_HAA L_HFE L_KFE L_ANKLE
+                    # R_HAA R_HFE R_KFE R_ANKLE
+COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0,  # left leg.
+                      1.0, 0.01, 0.01, 1.0]  # right leg.

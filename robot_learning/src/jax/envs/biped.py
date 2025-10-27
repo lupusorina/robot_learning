@@ -34,7 +34,7 @@ import time
 # Constants.
 NAME_ROBOT = 'biped'
 if NAME_ROBOT == 'biped':
-  import robot_learning.src.assets.biped_no_yaw_v2.config as robot_config
+  import robot_learning.src.assets.biped.config as robot_config
 else:
   raise ValueError(f'NAME_ROBOT must be "biped"')
 print('NAME_ROBOT:', NAME_ROBOT)
