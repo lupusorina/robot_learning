@@ -3,6 +3,9 @@ import subprocess
 import numpy as np
 np.set_printoptions(precision=3, suppress=True, linewidth=100)
 
+# Set MuJoCo to use EGL rendering to avoid GLX issues
+os.environ['MUJOCO_GL'] = 'egl'
+
 from datetime import datetime
 import functools
 from brax.training.agents.ppo import networks as ppo_networks
@@ -71,6 +74,34 @@ brax_ppo_config = config_dict.create(
         value_obs_key="privileged_state",
       ),
   )
+
+
+#debugging deepmimic PPO Config
+# brax_ppo_config = config_dict.create(
+#       num_timesteps=1000,  # Small number for debugging
+#       num_evals=2,  
+#       reward_scaling=1.0,
+#       clipping_epsilon=0.2,
+#       num_resets_per_eval=1,
+#       episode_length=100,  
+#       normalize_observations=True,
+#       action_repeat=1,
+#       unroll_length=10,  
+#       num_minibatches=8,  
+#       num_updates_per_batch=2,  
+#       discounting=0.97,
+#       learning_rate=3e-4,
+#       entropy_cost=0.005,
+#       num_envs=128,  
+#       batch_size=64, 
+#       max_grad_norm=1.0,
+#       network_factory=config_dict.create(
+#         policy_hidden_layer_sizes=(512,256,128),
+#         value_hidden_layer_sizes=(512,256,128),
+#         policy_obs_key="state",
+#         value_obs_key="privileged_state",
+#         ),
+#     )
 ppo_params = brax_ppo_config
 
 # Environment.
@@ -244,4 +275,4 @@ for policy_fn, folder in zip(policy_fn_list, policy_folder_list):
   # media.show_video(frames, fps=fps, loop=False)
   ABS_FOLDER_RESUlTS = epath.Path(RESULTS_FOLDER_PATH) / latest_folder
   media.write_video(f'{ABS_FOLDER_RESUlTS}/joystick_testing_{folder}_xvel_{x_vel}_yvel_{y_vel}_yawvel_{yaw_vel}.mp4', frames, fps=fps)
-  print('Video saved')
+  print(f'Video saved at:{ABS_FOLDER_RESUlTS}')
