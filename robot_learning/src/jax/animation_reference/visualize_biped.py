@@ -10,7 +10,12 @@ import os
 # Get the path to the biped XML file
 current_dir = os.path.dirname(os.path.abspath(__file__))
 assets_dir = os.path.join(current_dir, '../../../assets')
+
 xml_path = os.path.join(assets_dir, 'biped/xmls/biped_RL.xml')
+
+# simple solution, not good
+xml_path = "/home/marrodri/Documents/code-repositories/robot_learning_sorina/robot_learning/src/assets/biped/xmls/biped_RL.xml"
+os.environ['MUJOCO_GL'] = 'egl'
 
 def visualize_biped():
     """Load and visualize the biped model in an interactive MuJoCo viewer."""
@@ -59,5 +64,10 @@ def visualize_biped():
 
 if __name__ == "__main__":
     visualize_biped()
+
+
+
+
+
 
 
