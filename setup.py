@@ -9,6 +9,6 @@ setup(
     author='Sorina Lupu',
     author_email='lupusorina@yahoo.com',
     description='Robot training package with PyTorch and JAX support',
-    long_description=open('readme.md').read() if os.path.exists('readme.md') else '',
+    long_description=open('Readme.md').read() if os.path.exists('Readme.md') else '',
     long_description_content_type='text/markdown',
 )
