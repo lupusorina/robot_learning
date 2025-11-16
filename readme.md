@@ -5,7 +5,7 @@
 
 # Run the robot with the keyboard
 
-![Video](./videos/video_joystick.mov)
+![Video](./videos/video_joystick.gif)
 
 ```
 cd src/jax/envs
