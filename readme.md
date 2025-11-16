@@ -1,6 +1,16 @@
 ## Performance
 
-![Video](./video.gif)
+![Video](./videos/video.gif)
+
+
+# Run the robot with the keyboard
+
+![Video](./videos/keyboard_video.mov)
+
+```
+cd src/jax/envs
+python3 biped_test.py
+```
 
 ## Install requirements
 
