@@ -11,6 +11,9 @@ cd robot_learning/src/jax/envs
 mjpython biped_test.py
 ```
 
+Note: on MacOS you will likely need to whitelist both the terminal and the mjpython executable for input monitoring.
+In System Settings, navigate to Privacy & Security -> Input Monitoring, then add your terminal and mjpython (cmd+shift+G in the file browser will let you add a path).
+
 ## Install requirements
 
 Tested on Python 3.12.
