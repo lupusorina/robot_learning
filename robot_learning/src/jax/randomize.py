@@ -1,4 +1,5 @@
-# Modified from mujoco-playground.
+# Modified from MuJoCo Playground (Apache 2.0) by Google DeepMind.
+
 """Domain randomization for the Caltech's biped environment."""
 
 import jax

@@ -1,3 +1,5 @@
+# Modified from MuJoCo Playground (Apache 2.0) by Google DeepMind.
+
 from typing import Union
 
 import jax

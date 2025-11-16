@@ -69,3 +69,6 @@ robot_learning
 
     └── tests
 ```
+
+
+This project uses/derives from MuJoCo Playground (Apache 2.0) by Google DeepMind.”

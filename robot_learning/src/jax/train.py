@@ -1,3 +1,5 @@
+# Modified from MuJoCo Playground (Apache 2.0) by Google DeepMind.
+
 import os
 import subprocess
 import numpy as np
