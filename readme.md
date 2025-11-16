@@ -7,7 +7,7 @@
 <img src="./videos/video_joystick.gif" width="300"/>
 
 ```
-cd src/jax/envs
+cd robot_learning/src/jax/envs
 mjpython biped_test.py
 ```
 
