@@ -9,3 +9,4 @@ gymnasium
 mujoco
 tqdm
 torch
+pynput
