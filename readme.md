@@ -4,12 +4,11 @@
 
 
 # Run the robot with the keyboard
-
-![Video](./videos/video_joystick.gif)
+<img src="./videos/video_joystick.gif" width="300"/>
 
 ```
 cd src/jax/envs
-python3 biped_test.py
+mjpython biped_test.py
 ```
 
 ## Install requirements
