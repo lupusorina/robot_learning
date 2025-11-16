@@ -1,10 +1,10 @@
 ## Performance
 
-![Video](./videos/video.gif)
-
+<img src="./videos/video.gif" width="400"/>
 
 # Run the robot with the keyboard
-<img src="./videos/video_joystick.gif" width="300"/>
+
+<img src="./videos/video_joystick.gif" width="400"/>
 
 ```
 cd robot_learning/src/jax/envs
