@@ -5,6 +5,7 @@
 """
 
 from typing import Any, Dict, Optional, Union, Sequence
+import math as math_module
 import argparse
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint
 import jax
@@ -28,6 +29,7 @@ import functools
 import os
 import json
 import shutil
+import pickle
 
 import time
 
@@ -101,6 +103,17 @@ def default_config() -> config_dict.ConfigDict:
               joint_deviation_hip=-0.25,
               dof_pos_limits=-1.0,
               pose=-1.0,
+              # DeepMimic rewards (optional, for reference motion tracking).
+              deepmimic_pose_w=0.0,
+              deepmimic_vel_w=0.0,
+              deepmimic_root_pose_w=0.0,
+              deepmimic_root_vel_w=0.0,
+              deepmimic_key_pos_w=0.0,
+              deepmimic_pose_scale=2.0,
+              deepmimic_vel_scale=0.1,
+              deepmimic_root_pose_scale=5.0,
+              deepmimic_root_vel_scale=0.1,
+              deepmimic_key_pos_scale=5.0,
           ),
           max_foot_height=0.15,
           base_height_target=DESIRED_HEIGHT,
@@ -113,6 +126,12 @@ def default_config() -> config_dict.ConfigDict:
       lin_vel_x=[-0.2, 0.2],
       lin_vel_y=[-0.2, 0.2],
       ang_vel_yaw=[-0.2, 0.2],
+      # Motion retargeting config (optional)
+      motion_config=config_dict.create(
+          enable=False,  # Set to True to enable motion retargeting
+          motion_file_path=None,  # Path to motion pickle file
+          knee_joint_indices=None,  # [left_knee_idx, right_knee_idx] in motion file
+      ),
   )
 
 class Biped(mjx_env.MjxEnv):
@@ -228,6 +247,26 @@ class Biped(mjx_env.MjxEnv):
     # Initialize state history buffers.
     self._state_history = None
     self._privileged_state_history = None
+    
+    # Load motion file if enabled
+    self._motion_data = None
+    if config.motion_config.enable and config.motion_config.motion_file_path is not None:
+      if os.path.exists(config.motion_config.motion_file_path):
+        print(f"Loading motion file: {config.motion_config.motion_file_path}")
+        self._motion_data = self.load_motion_file(
+          config.motion_config.motion_file_path,
+          knee_joint_indices=config.motion_config.knee_joint_indices
+        )
+        print(f"Motion loaded: {self._motion_data['num_frames']} frames, "
+              f"{self._motion_data['motion_length']:.2f}s, "
+              f"fps={self._motion_data['fps']}")
+        
+        # Enable DeepMimic rewards
+        self._config.reward_config.scales.deepmimic_pose_w = 1.0
+        self._config.reward_config.scales.deepmimic_pose_scale = 2.0
+      else:
+        print(f"Warning: Motion file not found: {config.motion_config.motion_file_path}")
+        print("Continuing without motion tracking...")
 
     self.reset(rng=jax.random.PRNGKey(0))
 
@@ -345,6 +384,17 @@ class Biped(mjx_env.MjxEnv):
     )
     push_interval_steps = jp.round(push_interval / self.ctrl_dt).astype(jp.int32)
 
+    # Initialize motion time (for motion retargeting)
+    motion_time = jp.array(0.0)
+    if self._motion_data is not None:
+      # Sample random start time in motion
+      rng, motion_rng = jax.random.split(rng)
+      motion_time = jax.random.uniform(
+        motion_rng, 
+        minval=0.0, 
+        maxval=self._motion_data['motion_length']
+      )
+    
     info = {
         "rng": rng,
         "step": 0,
@@ -367,7 +417,9 @@ class Biped(mjx_env.MjxEnv):
         "xfrc_applied": data.xfrc_applied,
         # Initialize action history
         "action_history": jp.zeros((self._config.action_delay + 1, self.mjx_model.nu)),
-        "linvel_B": jp.array([0.0, 0.0, 0.0])
+        "linvel_B": jp.array([0.0, 0.0, 0.0]),
+        # Motion retargeting
+        "motion_time": motion_time,
     }
 
     # Initialize the metrics.
@@ -441,9 +493,93 @@ class Biped(mjx_env.MjxEnv):
     obs = self._get_obs(data, state.info, contact, state.obs["state"], state.obs["privileged_state"])
     done = self._get_termination(data)
 
+    # Update motion tracking and get target knee angles (for DeepMimic rewards)
+    tar_joint_rot = None
+    if self._motion_data is not None:
+      # Get current motion time from info
+      motion_time = state.info.get("motion_time", jp.array(0.0))
+      
+      # Get target knee angles at current motion time
+      # Handle vectorized case: motion_time might be an array
+      if motion_time.ndim == 0:
+        # Single environment
+        tar_knee_angles = self.get_motion_frame(self._motion_data, float(motion_time))
+      else:
+        # Vectorized: use vmap to get knee angles for each environment
+        # Convert motion_data to JAX arrays for vmap
+        motion_knee_angles = jp.array(self._motion_data['knee_angles'])  # [num_frames, 2]
+        motion_fps = self._motion_data['fps']
+        motion_num_frames = self._motion_data['num_frames']
+        motion_length = self._motion_data['motion_length']
+        motion_loop_mode = self._motion_data['loop_mode']
+        
+        def get_frame_fn(t):
+          # Convert time to frame index
+          frame_idx = t * motion_fps
+          
+          # Handle looping
+          if motion_loop_mode == 1:  # WRAP
+            frame_idx = frame_idx % (motion_num_frames - 1)
+          else:  # CLAMP
+            frame_idx = jp.clip(frame_idx, 0, motion_num_frames - 1)
+          
+          # Linear interpolation between frames
+          frame_idx_0 = jp.floor(frame_idx).astype(jp.int32)
+          frame_idx_1 = jp.minimum(frame_idx_0 + 1, motion_num_frames - 1).astype(jp.int32)
+          blend = frame_idx - frame_idx_0
+          
+          knee_0 = motion_knee_angles[frame_idx_0]
+          knee_1 = motion_knee_angles[frame_idx_1]
+          
+          # Linear interpolation
+          return (1.0 - blend) * knee_0 + blend * knee_1
+        
+        tar_knee_angles = jax.vmap(get_frame_fn)(motion_time)
+      
+      tar_joint_rot = tar_knee_angles
+      
+      # Update motion time for next step
+      motion_time = motion_time + self.ctrl_dt
+      
+      # Handle looping if motion is set to WRAP mode
+      if self._motion_data['loop_mode'] == 1:  # WRAP
+        motion_time = jp.where(
+          motion_time >= self._motion_data['motion_length'],
+          motion_time % self._motion_data['motion_length'],
+          motion_time
+        )
+      else:  # CLAMP
+        motion_time = jp.clip(motion_time, 0.0, self._motion_data['motion_length'])
+      
+      # Store updated motion time in info
+      state.info["motion_time"] = motion_time
+    
+    # Get other reference motion data from info if available (for DeepMimic rewards)
+    tar_root_pos = state.info.get("tar_root_pos", None)
+    tar_root_rot = state.info.get("tar_root_rot", None)
+    tar_root_vel = state.info.get("tar_root_vel", None)
+    tar_root_ang_vel = state.info.get("tar_root_ang_vel", None)
+    tar_dof_vel = state.info.get("tar_dof_vel", None)
+    tar_key_pos = state.info.get("tar_key_pos", None)
+    joint_err_w = state.info.get("joint_err_w", None)
+    dof_err_w = state.info.get("dof_err_w", None)
+    track_root = state.info.get("track_root", True)
+    track_root_h = state.info.get("track_root_h", True)
+
     # Get the rewards.
     rewards = self._get_reward(
-        data, action, state.info, state.metrics, done, first_contact, contact
+        data, action, state.info, state.metrics, done, first_contact, contact,
+        tar_root_pos=tar_root_pos,
+        tar_root_rot=tar_root_rot,
+        tar_root_vel=tar_root_vel,
+        tar_root_ang_vel=tar_root_ang_vel,
+        tar_joint_rot=tar_joint_rot,
+        tar_dof_vel=tar_dof_vel,
+        tar_key_pos=tar_key_pos,
+        joint_err_w=joint_err_w,
+        dof_err_w=dof_err_w,
+        track_root=track_root,
+        track_root_h=track_root_h,
     )
     rewards = {
         k: v * self._config.reward_config.scales[k] for k, v in rewards.items()
@@ -626,10 +762,21 @@ class Biped(mjx_env.MjxEnv):
       done: jax.Array,
       first_contact: jax.Array,
       contact: jax.Array,
+      tar_root_pos: Optional[jax.Array] = None,
+      tar_root_rot: Optional[jax.Array] = None,
+      tar_root_vel: Optional[jax.Array] = None,
+      tar_root_ang_vel: Optional[jax.Array] = None,
+      tar_joint_rot: Optional[jax.Array] = None,
+      tar_dof_vel: Optional[jax.Array] = None,
+      tar_key_pos: Optional[jax.Array] = None,
+      joint_err_w: Optional[jax.Array] = None,
+      dof_err_w: Optional[jax.Array] = None,
+      track_root: bool = True,
+      track_root_h: bool = True,
   ) -> dict[str, jax.Array]:
     del metrics  # Unused.
 
-    return {
+    rewards = {
         # Tracking rewards.
         "tracking_lin_vel": self._reward_tracking_lin_vel(
             info["command"], self._get_sensor_data(data, LOCAL_LINVEL_SENSOR)
@@ -672,6 +819,25 @@ class Biped(mjx_env.MjxEnv):
         "dof_pos_limits": self._cost_joint_pos_limits(data.qpos[7:]),
         "pose": self._cost_joint_angles(data.qpos[7:]),
     }
+    
+    # Add DeepMimic rewards if reference motion data is provided
+    deepmimic_rewards = self._compute_deepmimic_reward(
+        data=data,
+        tar_root_pos=tar_root_pos,
+        tar_root_rot=tar_root_rot,
+        tar_root_vel=tar_root_vel,
+        tar_root_ang_vel=tar_root_ang_vel,
+        tar_joint_rot=tar_joint_rot,
+        tar_dof_vel=tar_dof_vel,
+        tar_key_pos=tar_key_pos,
+        joint_err_w=joint_err_w,
+        dof_err_w=dof_err_w,
+        track_root=track_root,
+        track_root_h=track_root_h,
+    )
+    rewards.update(deepmimic_rewards)
+    
+    return rewards
 
   # Tracking rewards.
 
@@ -785,6 +951,262 @@ class Biped(mjx_env.MjxEnv):
     # cmd_norm = jp.linalg.norm(commands)
     # reward *= cmd_norm > 0.1  # No reward for zero commands.
     return reward
+
+  # DeepMimic reward functions for reference motion tracking.
+  
+  def _quat_diff_angle(self, q1: jax.Array, q2: jax.Array) -> jax.Array:
+    """Compute the angle difference between two quaternions."""
+    # Normalize quaternions
+    q1_norm = q1 / jp.linalg.norm(q1)
+    q2_norm = q2 / jp.linalg.norm(q2)
+    
+    # Compute relative rotation: q_rel = q1^-1 * q2
+    # q1^-1 = [-x, -y, -z, w] for quaternion [x, y, z, w]
+    q1_inv = jp.array([-q1_norm[0], -q1_norm[1], -q1_norm[2], q1_norm[3]])
+    q_rel = self._quat_mul(q1_inv, q2_norm)
+    
+    # Extract angle from quaternion: angle = 2 * arccos(|w|)
+    w = jp.clip(jp.abs(q_rel[3]), -1.0, 1.0)
+    angle = 2.0 * jp.arccos(w)
+    
+    return angle
+  
+  def _quat_mul(self, q1: jax.Array, q2: jax.Array) -> jax.Array:
+    """Multiply two quaternions. Input format: [x, y, z, w]."""
+    x1, y1, z1, w1 = q1[0], q1[1], q1[2], q1[3]
+    x2, y2, z2, w2 = q2[0], q2[1], q2[2], q2[3]
+    
+    w = w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2
+    x = w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2
+    y = w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2
+    z = w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2
+    
+    return jp.array([x, y, z, w])
+  
+  def _compute_deepmimic_reward(
+      self,
+      data: mjx.Data,
+      tar_root_pos: Optional[jax.Array] = None,
+      tar_root_rot: Optional[jax.Array] = None,
+      tar_root_vel: Optional[jax.Array] = None,
+      tar_root_ang_vel: Optional[jax.Array] = None,
+      tar_joint_rot: Optional[jax.Array] = None,
+      tar_dof_vel: Optional[jax.Array] = None,
+      tar_key_pos: Optional[jax.Array] = None,
+      joint_err_w: Optional[jax.Array] = None,
+      dof_err_w: Optional[jax.Array] = None,
+      track_root: bool = True,
+      track_root_h: bool = True,
+  ) -> dict[str, jax.Array]:
+    """
+    Compute DeepMimic-style rewards for reference motion tracking.
+    
+    Args:
+      data: Current simulation data
+      tar_root_pos: Target root position [3] or None
+      tar_root_rot: Target root rotation quaternion [4] or None
+      tar_root_vel: Target root linear velocity [3] or None
+      tar_root_ang_vel: Target root angular velocity [3] or None
+      tar_joint_rot: Target joint rotations [num_joints, 4] or None
+      tar_dof_vel: Target DOF velocities [num_dofs] or None
+      tar_key_pos: Target key body positions [num_key_bodies, 3] or None
+      joint_err_w: Joint error weights [num_joints] or None
+      dof_err_w: DOF error weights [num_dofs] or None
+      track_root: Whether to track root XY position
+      track_root_h: Whether to track root height
+    
+    Returns:
+      Dictionary of reward components
+    """
+    rewards = {}
+    
+    # Get current state - only need joint angles for knee joints
+    joint_angles = data.qpos[7:]
+    
+    # Extract only knee joint angles (L_KFE and R_KFE)
+    # _knee_indices contains the indices in the joint_angles array (0-indexed from qpos[7:])
+    knee_angles = joint_angles[self._knee_indices]  # [2] - left and right knee angles
+    
+    # Initialize default weights if not provided (only for knee joints)
+    if joint_err_w is None:
+      joint_err_w = jp.ones(len(knee_angles))
+    elif len(joint_err_w) > len(knee_angles):
+      # If weights are provided for all joints, extract only knee weights
+      joint_err_w = joint_err_w[self._knee_indices]
+    
+    # 1. Joint pose error - ONLY for knee joints
+    if tar_joint_rot is not None and tar_joint_rot.size > 0:
+      # Extract knee angles from target
+      if tar_joint_rot.ndim == 2 and tar_joint_rot.shape[1] == 4:
+        # Quaternion format: extract rotation angles from quaternions
+        # Check if tar_joint_rot has all joints or just knee joints
+        if tar_joint_rot.shape[0] > len(self._knee_indices):
+          # Has all joints, extract knee joints
+          tar_knee_quats = tar_joint_rot[self._knee_indices]  # [2, 4]
+        else:
+          # Already filtered to knee joints only
+          tar_knee_quats = tar_joint_rot  # [2, 4]
+        # Extract angles from quaternions (for hinge joints)
+        # For a quaternion [x, y, z, w], the rotation angle magnitude is 2*arccos(|w|)
+        # For hinge joints, we extract the angle around the rotation axis
+        # Simplified: use 2*arccos(|w|) for magnitude, sign from the axis component
+        def quat_to_angle(q):
+          w = jp.clip(jp.abs(q[3]), 1e-7, 1.0 - 1e-7)
+          angle_mag = 2.0 * jp.arccos(w)
+          # For hinge joints, the axis is typically [0, 1, 0] (Y-axis), so use y component for sign
+          # If y is the largest component, use its sign
+          axis_components = jp.abs(q[:3])
+          max_axis_idx = jp.argmax(axis_components)
+          sign = jp.sign(q[max_axis_idx]) if axis_components[max_axis_idx] > 1e-7 else 1.0
+          return angle_mag * sign
+        
+        tar_knee_angles = jp.array([quat_to_angle(q) for q in tar_knee_quats])
+      else:
+        # Joint angles format
+        # Check if tar_joint_rot has all joints or just knee joints
+        if len(tar_joint_rot) > len(self._knee_indices):
+          # Has all joints, extract knee joints
+          tar_knee_angles = tar_joint_rot[self._knee_indices]  # [2]
+        else:
+          # Already filtered to knee joints only
+          tar_knee_angles = tar_joint_rot  # [2]
+      
+      # Compute pose error for knee joints only
+      pose_diff = knee_angles - tar_knee_angles
+      pose_err = jp.sum(joint_err_w * pose_diff * pose_diff)
+      pose_r = jp.exp(-self._config.reward_config.scales.deepmimic_pose_scale * pose_err)
+      rewards["deepmimic_pose"] = pose_r
+    else:
+      rewards["deepmimic_pose"] = jp.array(0.0)
+    
+    # 2. Joint velocity error - disabled (only using knee angles)
+    rewards["deepmimic_vel"] = jp.array(0.0)
+    
+    # 3. Root pose error - disabled (only using knee angles)
+    rewards["deepmimic_root_pose"] = jp.array(0.0)
+    
+    # 4. Root velocity error - disabled (only using knee angles)
+    rewards["deepmimic_root_vel"] = jp.array(0.0)
+    
+    # 5. Key body position error - disabled (only using knee angles)
+    rewards["deepmimic_key_pos"] = jp.array(0.0)
+    
+    return rewards
+
+  def load_motion_file(self, motion_file_path: str, knee_joint_indices: Optional[list] = None) -> dict:
+    """
+    Load a motion file (pickle format) and extract knee angles.
+    
+    Motion file format:
+    - frames: numpy array [num_frames, 3 + 3 + num_joints]
+             [root_pos(3), root_rot(3), joint_dof(...)]
+    - fps: frames per second
+    - loop_mode: 0 (CLAMP) or 1 (WRAP)
+    
+    Args:
+      motion_file_path: Path to the pickle motion file
+      knee_joint_indices: Optional list of [left_knee_idx, right_knee_idx] in the joint_dof array.
+                         If None, assumes first 2 joints are knees (you'll need to adjust this).
+    
+    Returns:
+      Dictionary with:
+        - 'frames': [num_frames, 3 + 3 + num_joints] - all frame data
+        - 'knee_angles': [num_frames, 2] - extracted knee angles [L_KFE, R_KFE]
+        - 'fps': frames per second
+        - 'loop_mode': 0 or 1
+        - 'dt': time per frame (1/fps)
+        - 'num_frames': number of frames
+        - 'motion_length': total motion length in seconds
+    
+    Example usage:
+      # Load motion file
+      motion_data = env.load_motion_file('path/to/motion.pkl', knee_joint_indices=[1, 4])
+      
+      # In your training loop:
+      motion_time = 0.0
+      for step in range(num_steps):
+        # Get knee angles at current time
+        tar_knee_angles = env.get_motion_frame(motion_data, motion_time)
+        
+        # Add to state.info for reward computation
+        state.info["tar_joint_rot"] = tar_knee_angles
+        
+        # Step environment
+        state = env.step(state, action)
+        
+        # Update motion time
+        motion_time += env.ctrl_dt
+    """
+    with open(motion_file_path, 'rb') as f:
+      motion_data = pickle.load(f)
+    
+    frames = jp.array(motion_data['frames'])  # [num_frames, 3 + 3 + num_joints]
+    fps = motion_data['fps']
+    loop_mode = motion_data.get('loop_mode', 0)  # Default to CLAMP
+    
+    # Extract joint DOFs (everything after root_pos and root_rot)
+    joint_dof = frames[:, 6:]  # [num_frames, num_joints]
+    
+    # Extract knee angles
+    if knee_joint_indices is not None:
+      # Extract specific joint indices (e.g., [left_knee_idx, right_knee_idx])
+      knee_angles = joint_dof[:, knee_joint_indices]  # [num_frames, 2]
+    else:
+      # Default: assume first 2 joints are knees (YOU NEED TO ADJUST THIS!)
+      # This is a placeholder - you must provide knee_joint_indices based on your motion file
+      print("WARNING: Using default knee indices [0, 1]. You should provide knee_joint_indices!")
+      knee_angles = joint_dof[:, :2]  # [num_frames, 2]
+    
+    dt = 1.0 / fps
+    num_frames = frames.shape[0]
+    motion_length = (num_frames - 1) / fps
+    
+    return {
+      'frames': frames,
+      'joint_dof': joint_dof,
+      'knee_angles': knee_angles,  # You need to extract this properly
+      'fps': fps,
+      'loop_mode': loop_mode,
+      'dt': dt,
+      'num_frames': num_frames,
+      'motion_length': motion_length,
+    }
+  
+  def get_motion_frame(self, motion_data: dict, time: float) -> jax.Array:
+    """
+    Get knee angles from motion data at a specific time.
+    
+    Args:
+      motion_data: Dictionary returned by load_motion_file()
+      time: Time in seconds
+    
+    Returns:
+      Knee angles [2] at the given time (interpolated if needed)
+    """
+    fps = motion_data['fps']
+    knee_angles = motion_data['knee_angles']  # [num_frames, 2]
+    
+    # Convert time to frame index
+    frame_idx = time * fps
+    
+    # Handle looping
+    if motion_data['loop_mode'] == 1:  # WRAP
+      frame_idx = frame_idx % (motion_data['num_frames'] - 1)
+    else:  # CLAMP
+      frame_idx = jp.clip(frame_idx, 0, motion_data['num_frames'] - 1)
+    
+    # Linear interpolation between frames
+    frame_idx_0 = jp.floor(frame_idx).astype(jp.int32)
+    frame_idx_1 = jp.minimum(frame_idx_0 + 1, motion_data['num_frames'] - 1).astype(jp.int32)
+    blend = frame_idx - frame_idx_0
+    
+    knee_0 = knee_angles[frame_idx_0]
+    knee_1 = knee_angles[frame_idx_1]
+    
+    # Linear interpolation
+    knee_interp = (1.0 - blend) * knee_0 + blend * knee_1
+    
+    return knee_interp
 
   def sample_command(self, rng: jax.Array) -> jax.Array:
     rng1, rng2, rng3, rng4 = jax.random.split(rng, 4)
