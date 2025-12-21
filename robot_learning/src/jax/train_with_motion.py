@@ -51,7 +51,10 @@ print("Available devices:", jax.devices())
 # ============================================================================
 # Set these to enable motion retargeting
 USE_MOTION_RETARGETING = True  # Set to True to enable motion retargeting
-MOTION_FILE_PATH = '/Users/sorinalupu/OpenmindResearch/project6_biped/mimikkit/MimicKit/data/motions/humanoid/humanoid_walk.pkl'
+# change to marthel path
+MOTION_FILE_PATH = "/home/marrodri/Documents/code-repositories/robot_learning_sorina/robot_learning/src/assets/reference_motions/humanoid_walk.pkl"
+# MOTION_FILE_PATH = '/Users/sorinalupu/OpenmindResearch/project6_biped/mimikkit/MimicKit/data/motions/humanoid/humanoid_walk.pkl'
+
 KNEE_JOINT_INDICES = [1, 4]  # [left_knee_idx, right_knee_idx] in motion file
 # You need to determine these indices by inspecting your motion file:
 #   import pickle
@@ -64,7 +67,8 @@ KNEE_JOINT_INDICES = [1, 4]  # [left_knee_idx, right_knee_idx] in motion file
 
 # Brax PPO config.
 brax_ppo_config = config_dict.create(
-      num_timesteps=200_000_000,
+    #   num_timesteps=200_000_000,
+      num_timesteps=10000000,
       num_evals=15,
       reward_scaling=1.0,
       clipping_epsilon=0.2,
@@ -94,18 +98,13 @@ ppo_params = brax_ppo_config
 env_config_overrides = {}
 if USE_MOTION_RETARGETING:
     env_config_overrides = {
-        "motion_config": {
-            "enable": True,
-            "motion_file_path": MOTION_FILE_PATH,
-            "knee_joint_indices": KNEE_JOINT_INDICES,
-        },
+        "motion_config.enable": True,
+        "motion_config.motion_file_path": MOTION_FILE_PATH,
+        "motion_config.knee_joint_indices": KNEE_JOINT_INDICES,
         # Enable DeepMimic rewards (will be auto-enabled by environment, but you can override)
-        "reward_config": {
-            "scales": {
-                "deepmimic_pose_w": 1.0,  # Weight for knee angle matching reward
-                "deepmimic_pose_scale": 2.0,  # Scale (higher = stricter matching)
-            }
-        }
+        # Use flattened keys to avoid replacing the entire reward_config and losing base_height_target
+        "reward_config.scales.deepmimic_pose_w": 1.0,  # Weight for knee angle matching reward
+        "reward_config.scales.deepmimic_pose_scale": 2.0,  # Scale (higher = stricter matching)
     }
     print("=" * 60)
     print("MOTION RETARGETING ENABLED")
@@ -131,6 +130,7 @@ reward_list = []
 
 def progress(num_steps, metrics):
   clear_output(wait=True)
+  print(f"====new metric {metrics}======")
 
   times.append(datetime.now())
   x_data.append(num_steps)
@@ -154,8 +154,8 @@ def progress(num_steps, metrics):
   print("Reward for {} steps: {:.3f}".format(num_steps, y_data[-1]))
   if USE_MOTION_RETARGETING:
     # Print DeepMimic reward if available
-    if "eval/deepmimic_pose" in metrics:
-      print(f"  DeepMimic knee reward: {metrics['eval/deepmimic_pose']:.3f}")
+    if "eval/reward/deepmimic_pose_w" in metrics:
+      print(f"  DeepMimic knee reward: {metrics['eval/reward/deepmimic_pose_w']:.3f}")
   
 ppo_training_params = dict(ppo_params)
 network_factory = ppo_networks.make_ppo_networks

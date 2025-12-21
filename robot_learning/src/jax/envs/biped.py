@@ -5,6 +5,7 @@
 """
 
 from typing import Any, Dict, Optional, Union, Sequence
+import jax.numpy as jnp
 import math as math_module
 import argparse
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint
@@ -503,7 +504,7 @@ class Biped(mjx_env.MjxEnv):
       # Handle vectorized case: motion_time might be an array
       if motion_time.ndim == 0:
         # Single environment
-        tar_knee_angles = self.get_motion_frame(self._motion_data, float(motion_time))
+        tar_knee_angles = self.get_motion_frame(self._motion_data, jnp.float32(motion_time))
       else:
         # Vectorized: use vmap to get knee angles for each environment
         # Convert motion_data to JAX arrays for vmap
@@ -581,10 +582,14 @@ class Biped(mjx_env.MjxEnv):
         track_root=track_root,
         track_root_h=track_root_h,
     )
+    jax.debug.print("clipped reward is:{} ",rewards)
     rewards = {
         k: v * self._config.reward_config.scales[k] for k, v in rewards.items()
     }
+    jax.debug.print("clipped reward is:{} ",rewards.values())
     reward = jp.clip(sum(rewards.values()) * self.ctrl_dt, 0.0, 10000.0)
+    # issue is that is already not a number, this is interesting.
+    # jax.debug.print("clipped reward is:{} ",reward)
 
     state.info["push"] = push
     state.info["step"] += 1
@@ -1075,21 +1080,21 @@ class Biped(mjx_env.MjxEnv):
       pose_diff = knee_angles - tar_knee_angles
       pose_err = jp.sum(joint_err_w * pose_diff * pose_diff)
       pose_r = jp.exp(-self._config.reward_config.scales.deepmimic_pose_scale * pose_err)
-      rewards["deepmimic_pose"] = pose_r
+      rewards["deepmimic_pose_w"] = pose_r
     else:
-      rewards["deepmimic_pose"] = jp.array(0.0)
+      rewards["deepmimic_pose_w"] = jp.array(0.0)
     
     # 2. Joint velocity error - disabled (only using knee angles)
-    rewards["deepmimic_vel"] = jp.array(0.0)
+    rewards["deepmimic_vel_w"] = jp.array(0.0)
     
     # 3. Root pose error - disabled (only using knee angles)
-    rewards["deepmimic_root_pose"] = jp.array(0.0)
+    rewards["deepmimic_root_pose_w"] = jp.array(0.0)
     
     # 4. Root velocity error - disabled (only using knee angles)
-    rewards["deepmimic_root_vel"] = jp.array(0.0)
+    rewards["deepmimic_root_vel_w"] = jp.array(0.0)
     
     # 5. Key body position error - disabled (only using knee angles)
-    rewards["deepmimic_key_pos"] = jp.array(0.0)
+    rewards["deepmimic_key_pos_w"] = jp.array(0.0)
     
     return rewards
 
