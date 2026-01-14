@@ -30,6 +30,11 @@ from tqdm import tqdm
 
 import mediapy as media
 
+
+if 'XLA_CLIENT_MEM_FRACTION' not in os.environ:
+    os.environ['XLA_CLIENT_MEM_FRACTION'] = '0.7'  # Use 70% of GPU memory
+    print(f"Set XLA_CLIENT_MEM_FRACTION to {os.environ['XLA_CLIENT_MEM_FRACTION']}")
+
 # Set seed
 jax.random.PRNGKey(0)
 
@@ -46,21 +51,57 @@ print(f"Saving results to {ABS_FOLDER_RESUlTS}")
 
 print("Available devices:", jax.devices())
 
-# ============================================================================
-# MOTION RETARGETING CONFIGURATION
-# ============================================================================
-# Set these to enable motion retargeting
 USE_MOTION_RETARGETING = True  # Set to True to enable motion retargeting
-MOTION_FILE_PATH = '/Users/sorinalupu/OpenmindResearch/project6_biped/mimikkit/MimicKit/data/motions/humanoid/humanoid_walk.pkl'
-KNEE_JOINT_INDICES = [1, 4]  # [left_knee_idx, right_knee_idx] in motion file
+MOTION_FILE_PATH = '/home/sorina/mimikkit/MimicKit/data/motions/humanoid/humanoid_walk.pkl'
+
+# Order humanoid_walk.pkl:
+# [root position (3D), root rotation (3D), abdomen (3D), neck (3D), 
+# right_shoulder (3D), right_elbow (1D), left_shoulder (3D),
+# left_elbow (1D), right_hip (3D), right_knee (1D), right_ankle (3D),
+# left_hip (3D), left_knee (1D), left_ankle (3D)]
+IDXS_ROOT_POS = [0, 1, 2] # root position (3D)
+IDXS_ROOT_ROT = [3, 4, 5] # root rotation (3D)
+IDXS_ABDOMEN = [6, 7, 8] # abdomen (3D)
+IDXS_NECK = [9, 10, 11] # neck (3D)
+IDXS_RIGHT_SHOULDER = [12, 13, 14] # right_shoulder (3D)
+IDXS_RIGHT_ELBOW = 14 # right_elbow (1D)
+IDXS_LEFT_SHOULDER = [15, 16, 17] # left_shoulder (3D)
+IDXS_LEFT_ELBOW = 18 # left_elbow (1D)
+IDXS_RIGHT_HIP = [19, 20, 21] # right_hip (3D)
+IDXS_RIGHT_KNEE = 22 # right_knee (1D)
+IDXS_RIGHT_ANKLE = [23, 24, 25] # right_ankle (3D)
+IDXS_LEFT_HIP = [26, 27, 28] # left_hip (3D)
+IDXS_LEFT_KNEE = 29 # left_knee (1D)
+IDXS_LEFT_ANKLE = [30, 31, 32] # left_ankle (3D)
+
+KNEE_JOINT_INDICES = [IDXS_LEFT_KNEE, IDXS_RIGHT_KNEE]  # [left_knee_idx, right_knee_idx] in motion file
 # You need to determine these indices by inspecting your motion file:
-#   import pickle
-#   with open(MOTION_FILE_PATH, 'rb') as f:
-#       data = pickle.load(f)
-#   print(f"Frames shape: {data['frames'].shape}")
-#   print(f"Number of joints: {data['frames'].shape[1] - 6}")
-#   # Inspect joint_dof = data['frames'][0, 6:] to find knee indices
-# ============================================================================
+import pickle
+with open(MOTION_FILE_PATH, 'rb') as f:
+    data = pickle.load(f)
+
+left_knees_angles = []
+right_knees_angles = []
+
+# Repeat each frame N times for visualization
+N = 5  # Number of times to repeat each frame
+
+for i in range(len(data['frames'])):
+    left_angle = data['frames'][i][IDXS_LEFT_KNEE]
+    right_angle = data['frames'][i][IDXS_RIGHT_KNEE]
+    left_knees_angles.append(left_angle)
+    right_knees_angles.append(right_angle)
+
+left_knees_angles = left_knees_angles * N
+right_knees_angles = right_knees_angles * N
+
+plt.plot(np.rad2deg(left_knees_angles), label='LEFT KNEE')
+plt.plot(np.rad2deg(right_knees_angles), label='RIGHT KNEE')
+plt.legend()
+plt.savefig(f'knee_angles.png')
+
+import sys
+sys.exit()
 
 # Brax PPO config.
 brax_ppo_config = config_dict.create(
@@ -94,18 +135,12 @@ ppo_params = brax_ppo_config
 env_config_overrides = {}
 if USE_MOTION_RETARGETING:
     env_config_overrides = {
-        "motion_config": {
-            "enable": True,
-            "motion_file_path": MOTION_FILE_PATH,
-            "knee_joint_indices": KNEE_JOINT_INDICES,
-        },
+        "motion_config.enable": True,
+        "motion_config.motion_file_path": MOTION_FILE_PATH,
+        "motion_config.knee_joint_indices": KNEE_JOINT_INDICES,
         # Enable DeepMimic rewards (will be auto-enabled by environment, but you can override)
-        "reward_config": {
-            "scales": {
-                "deepmimic_pose_w": 1.0,  # Weight for knee angle matching reward
-                "deepmimic_pose_scale": 2.0,  # Scale (higher = stricter matching)
-            }
-        }
+        "reward_config.scales.deepmimic_pose_w": 1.0,  # Weight for knee angle matching reward
+        "reward_config.scales.deepmimic_pose_scale": 2.0,  # Scale (higher = stricter matching)
     }
     print("=" * 60)
     print("MOTION RETARGETING ENABLED")
@@ -187,4 +222,3 @@ print(f"time to jit: {times[1] - times[0]}")
 print(f"time to train: {times[-1] - times[1]}")
 
 print("Training complete!")
-
