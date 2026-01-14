@@ -199,13 +199,13 @@ if "network_factory" in ppo_params:
       **ppo_params.network_factory
   )
 
-from robot_learning.src.jax.randomize import domain_randomize
+# from robot_learning.src.jax.randomize import domain_randomize
 
 train_fn = functools.partial(
     ppo.train, **dict(ppo_training_params),
     network_factory=network_factory,
     progress_fn=progress,
-    randomization_fn=domain_randomize,
+    # randomization_fn=domain_randomize,
     save_checkpoint_path=ABS_FOLDER_RESUlTS,
     # restore_checkpoint_path=FOLDER_RESTORE_CHECKPOINT
 )
