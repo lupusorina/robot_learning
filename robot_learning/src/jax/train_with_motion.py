@@ -100,8 +100,6 @@ plt.plot(np.rad2deg(right_knees_angles), label='RIGHT KNEE')
 plt.legend()
 plt.savefig(f'knee_angles.png')
 
-import sys
-sys.exit()
 
 # Brax PPO config.
 brax_ppo_config = config_dict.create(
