@@ -4,9 +4,7 @@
   https://github.com/google-deepmind/mujoco_playground/
 """
 
-from typing import Any, Dict, Optional, Union, Sequence
-import math as math_module
-import argparse
+from typing import Any, Dict, Optional, Union
 from brax.training.agents.ppo import checkpoint as ppo_checkpoint
 import jax
 import jax.numpy as jp
@@ -99,7 +97,7 @@ def default_config() -> config_dict.ConfigDict:
               alive=0.0,
               termination=-1.0,
               # Pose related rewards.
-              joint_deviation_knee=-0.1,
+              joint_deviation_knee=0.0,
               joint_deviation_hip=-0.25,
               dof_pos_limits=-1.0,
               pose=-1.0,
@@ -426,6 +424,12 @@ class Biped(mjx_env.MjxEnv):
     metrics = {}
     for k in self._config.reward_config.scales.keys():
       metrics[f"reward/{k}"] = jp.zeros(())
+    # Also initialize deepmimic reward keys (without _w suffix) that are used in step
+    deepmimic_keys = ["deepmimic_pose", "deepmimic_vel", "deepmimic_root_pose", 
+                      "deepmimic_root_vel", "deepmimic_key_pos"]
+    for k in deepmimic_keys:
+      if f"reward/{k}" not in metrics:  # Only add if not already present
+        metrics[f"reward/{k}"] = jp.zeros(())
     metrics["swing_peak"] = jp.zeros(())
     
     # Initialize the contact.
@@ -503,7 +507,7 @@ class Biped(mjx_env.MjxEnv):
       # Handle vectorized case: motion_time might be an array
       if motion_time.ndim == 0:
         # Single environment
-        tar_knee_angles = self.get_motion_frame(self._motion_data, float(motion_time))
+        tar_knee_angles = self.get_motion_frame(self._motion_data, motion_time)
       else:
         # Vectorized: use vmap to get knee angles for each environment
         # Convert motion_data to JAX arrays for vmap
@@ -581,10 +585,20 @@ class Biped(mjx_env.MjxEnv):
         track_root=track_root,
         track_root_h=track_root_h,
     )
+    # Map reward keys to config scale keys (handle deepmimic rewards with _w suffix)
+    def get_scale_key(reward_key):
+      if reward_key.startswith("deepmimic_"):
+        return reward_key + "_w"
+      return reward_key
+
     rewards = {
-        k: v * self._config.reward_config.scales[k] for k, v in rewards.items()
+        k: v * self._config.reward_config.scales[get_scale_key(k)] for k, v in rewards.items()
     }
+    # Ensure all rewards are finite before summing
+    rewards = {k: jp.where(jp.isfinite(v), v, jp.array(0.0)) for k, v in rewards.items()}
     reward = jp.clip(sum(rewards.values()) * self.ctrl_dt, 0.0, 10000.0)
+    # Final safety check - ensure reward is finite
+    reward = jp.where(jp.isfinite(reward), reward, jp.array(0.0))
 
     state.info["push"] = push
     state.info["step"] += 1
@@ -1057,10 +1071,16 @@ class Biped(mjx_env.MjxEnv):
           # If y is the largest component, use its sign
           axis_components = jp.abs(q[:3])
           max_axis_idx = jp.argmax(axis_components)
-          sign = jp.sign(q[max_axis_idx]) if axis_components[max_axis_idx] > 1e-7 else 1.0
+          # Use JAX conditional instead of Python if/else
+          sign = jp.where(
+            axis_components[max_axis_idx] > 1e-7,
+            jp.sign(q[max_axis_idx]),
+            jp.array(1.0)
+          )
           return angle_mag * sign
         
-        tar_knee_angles = jp.array([quat_to_angle(q) for q in tar_knee_quats])
+        # Use vmap instead of list comprehension for JAX compatibility
+        tar_knee_angles = jax.vmap(quat_to_angle)(tar_knee_quats)
       else:
         # Joint angles format
         # Check if tar_joint_rot has all joints or just knee joints
@@ -1072,9 +1092,19 @@ class Biped(mjx_env.MjxEnv):
           tar_knee_angles = tar_joint_rot  # [2]
       
       # Compute pose error for knee joints only
+      # Ensure tar_knee_angles are valid (not NaN or Inf)
+      tar_knee_angles = jp.where(
+        jp.isfinite(tar_knee_angles),
+        tar_knee_angles,
+        jp.zeros_like(tar_knee_angles)
+      )
       pose_diff = knee_angles - tar_knee_angles
       pose_err = jp.sum(joint_err_w * pose_diff * pose_diff)
+      # Clip pose_err to prevent overflow in exp
+      pose_err = jp.clip(pose_err, 0.0, 100.0)
       pose_r = jp.exp(-self._config.reward_config.scales.deepmimic_pose_scale * pose_err)
+      # Ensure reward is finite
+      pose_r = jp.where(jp.isfinite(pose_r), pose_r, jp.array(0.0))
       rewards["deepmimic_pose"] = pose_r
     else:
       rewards["deepmimic_pose"] = jp.array(0.0)
@@ -1094,68 +1124,22 @@ class Biped(mjx_env.MjxEnv):
     return rewards
 
   def load_motion_file(self, motion_file_path: str, knee_joint_indices: Optional[list] = None) -> dict:
-    """
-    Load a motion file (pickle format) and extract knee angles.
-    
-    Motion file format:
-    - frames: numpy array [num_frames, 3 + 3 + num_joints]
-             [root_pos(3), root_rot(3), joint_dof(...)]
-    - fps: frames per second
-    - loop_mode: 0 (CLAMP) or 1 (WRAP)
-    
-    Args:
-      motion_file_path: Path to the pickle motion file
-      knee_joint_indices: Optional list of [left_knee_idx, right_knee_idx] in the joint_dof array.
-                         If None, assumes first 2 joints are knees (you'll need to adjust this).
-    
-    Returns:
-      Dictionary with:
-        - 'frames': [num_frames, 3 + 3 + num_joints] - all frame data
-        - 'knee_angles': [num_frames, 2] - extracted knee angles [L_KFE, R_KFE]
-        - 'fps': frames per second
-        - 'loop_mode': 0 or 1
-        - 'dt': time per frame (1/fps)
-        - 'num_frames': number of frames
-        - 'motion_length': total motion length in seconds
-    
-    Example usage:
-      # Load motion file
-      motion_data = env.load_motion_file('path/to/motion.pkl', knee_joint_indices=[1, 4])
-      
-      # In your training loop:
-      motion_time = 0.0
-      for step in range(num_steps):
-        # Get knee angles at current time
-        tar_knee_angles = env.get_motion_frame(motion_data, motion_time)
-        
-        # Add to state.info for reward computation
-        state.info["tar_joint_rot"] = tar_knee_angles
-        
-        # Step environment
-        state = env.step(state, action)
-        
-        # Update motion time
-        motion_time += env.ctrl_dt
-    """
     with open(motion_file_path, 'rb') as f:
       motion_data = pickle.load(f)
     
-    frames = jp.array(motion_data['frames'])  # [num_frames, 3 + 3 + num_joints]
+    frames = jp.array(motion_data['frames'])
     fps = motion_data['fps']
-    loop_mode = motion_data.get('loop_mode', 0)  # Default to CLAMP
-    
-    # Extract joint DOFs (everything after root_pos and root_rot)
-    joint_dof = frames[:, 6:]  # [num_frames, num_joints]
+    loop_mode = motion_data.get('loop_mode', 0)
     
     # Extract knee angles
     if knee_joint_indices is not None:
       # Extract specific joint indices (e.g., [left_knee_idx, right_knee_idx])
-      knee_angles = joint_dof[:, knee_joint_indices]  # [num_frames, 2]
+      knee_angles = frames[:, knee_joint_indices]  # [num_frames, 2]
     else:
-      # Default: assume first 2 joints are knees (YOU NEED TO ADJUST THIS!)
-      # This is a placeholder - you must provide knee_joint_indices based on your motion file
-      print("WARNING: Using default knee indices [0, 1]. You should provide knee_joint_indices!")
-      knee_angles = joint_dof[:, :2]  # [num_frames, 2]
+      print("Error: knee_joint_indices is not provided!")
+
+    # Ensure knee angles are finite (replace NaN/Inf with zeros)
+    knee_angles = jp.where(jp.isfinite(knee_angles), knee_angles, jp.zeros_like(knee_angles))
     
     dt = 1.0 / fps
     num_frames = frames.shape[0]
@@ -1163,8 +1147,7 @@ class Biped(mjx_env.MjxEnv):
     
     return {
       'frames': frames,
-      'joint_dof': joint_dof,
-      'knee_angles': knee_angles,  # You need to extract this properly
+      'knee_angles': knee_angles,
       'fps': fps,
       'loop_mode': loop_mode,
       'dt': dt,
@@ -1172,26 +1155,18 @@ class Biped(mjx_env.MjxEnv):
       'motion_length': motion_length,
     }
   
-  def get_motion_frame(self, motion_data: dict, time: float) -> jax.Array:
-    """
-    Get knee angles from motion data at a specific time.
-    
-    Args:
-      motion_data: Dictionary returned by load_motion_file()
-      time: Time in seconds
-    
-    Returns:
-      Knee angles [2] at the given time (interpolated if needed)
-    """
+  def get_motion_frame(self, motion_data: dict, time: Union[float, jax.Array]) -> jax.Array:
     fps = motion_data['fps']
-    knee_angles = motion_data['knee_angles']  # [num_frames, 2]
+    knee_angles = jp.array(motion_data['knee_angles'])
     
     # Convert time to frame index
     frame_idx = time * fps
     
     # Handle looping
     if motion_data['loop_mode'] == 1:  # WRAP
-      frame_idx = frame_idx % (motion_data['num_frames'] - 1)
+      # Ensure we don't divide by zero
+      divisor = jp.maximum(motion_data['num_frames'] - 1, 1)
+      frame_idx = frame_idx % divisor
     else:  # CLAMP
       frame_idx = jp.clip(frame_idx, 0, motion_data['num_frames'] - 1)
     
@@ -1199,12 +1174,21 @@ class Biped(mjx_env.MjxEnv):
     frame_idx_0 = jp.floor(frame_idx).astype(jp.int32)
     frame_idx_1 = jp.minimum(frame_idx_0 + 1, motion_data['num_frames'] - 1).astype(jp.int32)
     blend = frame_idx - frame_idx_0
+    # Ensure blend is in valid range [0, 1]
+    blend = jp.clip(blend, 0.0, 1.0)
     
     knee_0 = knee_angles[frame_idx_0]
     knee_1 = knee_angles[frame_idx_1]
     
+    # Ensure knee angles are finite
+    knee_0 = jp.where(jp.isfinite(knee_0), knee_0, jp.zeros_like(knee_0))
+    knee_1 = jp.where(jp.isfinite(knee_1), knee_1, jp.zeros_like(knee_1))
+    
     # Linear interpolation
     knee_interp = (1.0 - blend) * knee_0 + blend * knee_1
+    
+    # Final safety check
+    knee_interp = jp.where(jp.isfinite(knee_interp), knee_interp, jp.zeros_like(knee_interp))
     
     return knee_interp
 
