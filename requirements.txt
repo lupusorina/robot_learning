@@ -1,9 +1,9 @@
 matplotlib
 mediapy
 brax
-jax
+#jax
 # brax==0.12.3
-# jax[cuda12]==0.5.1
+jax[cuda12]==0.9.1
 imageio
 gymnasium
 mujoco
