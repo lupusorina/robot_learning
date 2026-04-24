@@ -1,0 +1,24 @@
+name: robot-learning-gpu
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - matplotlib
+  - imageio
+  - tqdm
+  - pip:
+      - brax==0.14.2
+      - chex
+      - etils
+      - flax
+      - gymnasium
+      - ipython
+      - "jax[cuda13]==0.9.2"
+      - mediapy
+      - ml-collections
+      - mujoco
+      - mujoco-mjx
+      - optax
+      - pynput

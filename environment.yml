@@ -1,0 +1,29 @@
+# Legacy compatibility environment.
+# For the tested NVIDIA GPU training setup, use environment_gpu.yml instead.
+name: robot-learning
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - numpy
+  - matplotlib
+  - imageio
+  - tqdm
+  - pip:
+      - brax==0.12.3
+      - chex
+      - etils
+      - flax
+      - gymnasium
+      - ipython
+      - jax==0.5.3
+      - jax-cuda12-pjrt==0.5.3
+      - jax-cuda12-plugin==0.5.3
+      - jaxlib==0.5.3
+      - mediapy
+      - ml-collections
+      - mujoco==3.3.2
+      - mujoco-mjx==3.3.2
+      - pynput
+      - torch

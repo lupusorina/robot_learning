@@ -3,6 +3,7 @@ __pycache__
 *.png
 *.pdf
 .venv
+.conda/
 runs
 .DS_Store
 *.egg-info/
