@@ -71,8 +71,12 @@ brax_ppo_config = config_dict.create(
         value_hidden_layer_sizes=(512, 256, 128),
         policy_obs_key="state",
         value_obs_key="privileged_state",
+        policy_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
+        value_network_kernel_init_fn=jax.nn.initializers.lecun_uniform,
+        mean_kernel_init_fn=jax.nn.initializers.lecun_uniform,
       ),
   )
+
 ppo_params = brax_ppo_config
 
 # Environment.
