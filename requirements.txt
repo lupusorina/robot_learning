@@ -1,6 +1,6 @@
 matplotlib
 mediapy
-brax==0.14.1
+brax==0.14.2
 #jax
 jax[cuda12]==0.9.1
 imageio
