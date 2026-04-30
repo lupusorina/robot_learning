@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 import dataclasses
+from utils import tile_images, save_video, SaveVideoWrapper
 
 from skrl.agents.torch.ppo import PPO
 try:
@@ -20,12 +21,10 @@ except ImportError:
 from skrl.envs.wrappers.torch import wrap_env
 from skrl.memories.torch import RandomMemory
 from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
-from skrl.resources.preprocessors.torch import RunningStandardScaler
 try:
     from skrl.resources.schedulers.torch import KLAdaptiveRL
 except ImportError:
     from skrl.resources.schedulers.torch import KLAdaptiveLR as KLAdaptiveRL
-from skrl.trainers.torch import SequentialTrainer, StepTrainer
 try:
     from skrl.trainers.torch import TrainerCfg
 except ImportError:
@@ -106,10 +105,10 @@ class Value(DeterministicMixin, Model):
 
 cfg = dataclasses.asdict(_PPO_DEFAULTS()) if callable(_PPO_DEFAULTS) else _PPO_DEFAULTS.copy()
 
-cfg["rollouts"] = 1024  # memory_size
+cfg["rollouts"] = 2048  # memory_size
 cfg["learning_epochs"] = 10
 cfg["mini_batches"] = 32
-cfg["discount_factor"] = 0.99
+cfg["discount_factor"] = 0.97
 cfg["time_limit_bootstrap"] = False # default is False
 if "gae_lambda" in cfg:
     cfg["gae_lambda"] = 0.95
@@ -237,7 +236,7 @@ if __name__ == "__main__":
     if env_name == "biped":
         import envs.biped as biped
         env = biped.VectorEnv(biped.BipedSim(), num_envs=2048)
-        env = biped.SaveVideoWrapper(env, f"videos/biped_{experiment_name}")
+        env = SaveVideoWrapper(env, f"videos/biped_{experiment_name}")
     else:
         env = gym.make_vec(env_name, num_envs=100, vectorization_mode="sync")
     env_not_wrapped = env
