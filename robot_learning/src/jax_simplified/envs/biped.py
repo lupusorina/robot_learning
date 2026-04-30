@@ -33,8 +33,8 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 
 
 # Notes:
-# - mujoco quaternion order is [w, x, y, z]
-# - mujoco qpos order for 6dof is [position, quaternion]
+# - MuJoCo quaternion order is [w, x, y, z]
+# - MuJoCo qpos order for 6dof is [position, quaternion]
 # - joint omega is in the body frame, joint velocity is in the world frame
 #    (see https://github.com/google-deepmind/mujoco/blob/main/doc/overview.rst#floating-objects)
 
@@ -446,8 +446,6 @@ class BipedSim:
     def extract_render_state(state: "BipedSim.BipedState") -> jax.Array:
         return state.mjdata.qpos
 
-# Backward-compatibility alias for older imports.
-CraneSim = BipedSim
 
 class VectorEnv(gym.vector.VectorEnv):
     """A vectorized, JIT-compiled batched environment."""
