@@ -156,13 +156,10 @@ class Biped(mjx_env.MjxEnv):
         self.name_joints.append(mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, i))
     print(f'  Name joints: {self.name_joints}')
     # get the qpos index for the ankle joints
-    ANKLE_JOINT_NAMES = ['L_ANKLE', 'R_ANKLE']
-    print(self.mj_model.joint('L_HAA').qposadr)
     self.L_ANKLE_q_pos_idx = self.mj_model.joint('L_ANKLE').qposadr[0]
     self.R_ANKLE_q_pos_idx = self.mj_model.joint('R_ANKLE').qposadr[0]
     self.L_ANKLE_qvel_idx = self.L_ANKLE_q_pos_idx - 1
     self.R_ANKLE_qvel_idx = self.R_ANKLE_q_pos_idx - 1
-
 
     list_joint_names_to_ignore = ['root']
     self.joint_idx_to_ignore_dict = {}
@@ -781,9 +778,6 @@ class Biped(mjx_env.MjxEnv):
     rz = utils.get_rz(phase, swing_height=foot_height)
     error = jp.sum(jp.square(foot_z - rz))
     reward = jp.exp(-error / 0.01)
-    # TODO(kevin): Ensure no movement at 0 command.
-    # cmd_norm = jp.linalg.norm(commands)
-    # reward *= cmd_norm > 0.1  # No reward for zero commands.
     return reward
 
   def sample_command(self, rng: jax.Array) -> jax.Array:
