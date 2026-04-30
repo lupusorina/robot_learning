@@ -7,30 +7,25 @@ if 'DISPLAY' not in os.environ:
 if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
     os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
 
-import mujoco
-import mujoco.viewer
-import mujoco.mjx
-import jinja2
-import jax.numpy as jnp
 import jax
-from jax.scipy.spatial.transform import Rotation as R
-import numpy as np
-import imageio # pip install imageio[ffmpeg]
 import time
-import math
+import mujoco
+import mujoco.mjx
+import numpy as np
 from flax import struct
-from typing import Protocol, Type, Any
-import copy
 import gymnasium as gym
+import jax.numpy as jnp
+from jax.scipy.spatial.transform import Rotation as R
+
+# Custom imports.
+import utils
+from utils import MjxRenderer, save_video, tile_images
+from utils import RingBuffer
 
 if "JAX_COMPILATION_CACHE_DIR" not in os.environ:
     jax.config.update("jax_compilation_cache_dir", "/tmp/jax_cache")
 jax.config.update("jax_persistent_cache_min_entry_size_bytes", -1)
 jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
-
-# jax.config.update("jax_log_compiles", True)
-
-
 
 # Notes:
 # - MuJoCo quaternion order is [w, x, y, z]
@@ -38,154 +33,11 @@ jax.config.update("jax_persistent_cache_min_compile_time_secs", 0)
 # - joint omega is in the body frame, joint velocity is in the world frame
 #    (see https://github.com/google-deepmind/mujoco/blob/main/doc/overview.rst#floating-objects)
 
-def save_video(images, filename, fps=30):
-    images = [np.array(img) for img in images]
-    images = np.array(images)
-    os.makedirs(os.path.dirname(filename), exist_ok=True) if os.path.dirname(filename) else None
-    imageio.mimwrite(filename, images, fps=fps)
-
-def tile_images(images: tuple[np.ndarray]) -> np.ndarray:
-    """Tile a list of images into a nearly square grid (close to square layout)."""
-    images = list(images)
-    n = len(images)
-    # Compute grid size (rows, cols) to make as close to square as possible
-    cols = math.ceil(math.sqrt(n))
-    rows = math.ceil(n / cols)
-    # Get image height and width
-    h, w = images[0].shape[:2]
-    # Fill extra spots with black images if needed
-    images_padded = images + [np.zeros_like(images[0]) for _ in range(rows * cols - n)]
-    # Stack images row by row
-    img_rows = []
-    for i in range(rows):
-        img_row = np.concatenate(images_padded[i * cols:(i + 1) * cols], axis=1)
-        img_rows.append(img_row)
-    grid = np.concatenate(img_rows, axis=0)
-    return grid
-
-class MjxRenderer:
-    def __init__(self, model: mujoco.MjModel, height=240, width=320):
-        self.model = model
-        self.mj_data = mujoco.MjData(model)
-        self.renderer = mujoco.Renderer(model, height=height, width=width)
-
-    def render(self, qpos: jax.Array):
-        self.mj_data.qpos[:] = np.array(qpos)
-        mujoco.mj_forward(self.model, self.mj_data)
-        self.renderer.update_scene(self.mj_data, camera=-1)
-        return self.renderer.render()
-
-
-
-# template = jinja2.Template(open("biped.jinja.xml", "r").read())
-# xml_string = template.render()
-# with open("biped.rendered.xml", "w") as f:
-#     f.write(xml_string)
-
-# model = mujoco.MjModel.from_xml_string(xml_string)
-# data = mujoco.MjData(model)
-
-# mujoco.viewer.launch(model, data)
-
 
 def replace_pytree(pytree, replacements: dict[str, jax.Array]):
     def update_fn(path, value):
         return replacements.get(jax.tree_util.keystr(path), value)
     return jax.tree_util.tree_map_with_path(update_fn, pytree)
-
-def key_stream(rng: jax.Array):
-    """Generator for random number stream."""
-    while True:
-        rng, subkey = jax.random.split(rng)
-        yield subkey
-
-@struct.dataclass
-class RingBuffer:
-    buf: Any        # pytree, leaves shaped (N, ...)
-    idx: jax.Array  # scalar int32
-    N: int  # number of elements in the buffer
-
-    @staticmethod
-    def init(example, N: int) -> "RingBuffer":
-        buf = jax.tree.map(
-            lambda x: jnp.broadcast_to(x, (N,) + x.shape),
-            example,
-        )
-        return RingBuffer(buf=buf, idx=jnp.int32(0), N=N)
-
-    @staticmethod
-    def push(rb: "RingBuffer", x) -> "RingBuffer":
-        buf = jax.tree.map(
-            lambda b, xi: b.at[rb.idx].set(xi),
-            rb.buf,
-            x,
-        )
-        idx = (rb.idx + 1) % rb.N
-        return RingBuffer(buf=buf, idx=idx, N=rb.N)
-
-    @staticmethod
-    def get(rb: "RingBuffer", k: jax.Array):
-        """k=0 -> most recent"""
-        i = (rb.idx - 1 - k) % rb.N
-        return jax.tree.map(lambda b: b[i], rb.buf)
-
-
-class BaseMotion(Protocol):
-    def update(self, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        ...
-    def reset(self, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        ...
-    @classmethod
-    def get_randomized_model_params(cls, rng: jax.Array) -> dict[str, jax.Array]:
-        ...
-
-@struct.dataclass
-class MotionPlatform:
-    period: jax.Array = struct.field(default_factory=lambda: jnp.array(1.0))
-    phase: jax.Array = struct.field(default_factory=lambda: jnp.array(0.))
-    angle_amplitude: jax.Array = struct.field(default_factory=lambda: jnp.array(0.))
-    pos_amplitude: jax.Array = struct.field(default_factory=lambda: jnp.array(0.))
-
-    @classmethod
-    def get_randomized_model_params(cls, rng: jax.Array) -> dict[str, jax.Array]:
-        key = key_stream(rng)
-        out = {}
-        out[".period"] = jax.random.uniform(next(key), (), minval=3., maxval=6.0)
-        out[".phase"] = jax.random.uniform(next(key), (), minval=0.0, maxval=2*jnp.pi)
-        zero_mask = jax.random.uniform(next(key), ()) < 0.25
-        angle_amp = jax.random.uniform(next(key), (), minval=0.0, maxval=0.2)
-        pos_amp = jax.random.uniform(next(key), (), minval=0.0, maxval=0.1)
-        out[".angle_amplitude"] = jnp.where(zero_mask, 0.0, angle_amp)
-        out[".pos_amplitude"] = jnp.where(zero_mask, 0.0, pos_amp)
-        return out
-
-    def update(self, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        t = mjdata.time
-        p = t / self.period * 2 * jnp.pi + self.phase
-        angle = jnp.sin(p) * self.angle_amplitude
-        pos = jnp.array([jnp.sin(p), 0.0, jnp.cos(p)-1.0])*self.pos_amplitude
-        quat = jnp.array([jnp.cos(angle/2), 0.0, jnp.sin(angle/2), 0.0])
-        mocap_pos_new = mjdata.mocap_pos.at[0].set(pos)
-        mocap_quat_new = mjdata.mocap_quat.at[0].set(quat)
-        return mjdata.replace(mocap_pos=mocap_pos_new, mocap_quat=mocap_quat_new)
-
-    def reset(self, mjmodel: mujoco._structs.MjModel, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        mjdata = self.update(mjdata)
-        base_joint_idx = mujoco.mj_name2id(mjmodel, mujoco.mjtObj.mjOBJ_JOINT, "base_free_joint")
-        base_qpos_adr = mjmodel.jnt_qposadr[base_joint_idx]
-        base_qpos = jnp.concatenate([mjdata.mocap_pos[0], mjdata.mocap_quat[0]])
-        mjdata = mjdata.replace(qpos=mjdata.qpos.at[base_qpos_adr:base_qpos_adr+7].set(base_qpos))
-        return mjdata
-
-@struct.dataclass
-class NoMotion():
-    def update(self, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        return mjdata
-    def reset(self, mjmodel: mujoco._structs.MjModel, mjdata: mujoco.mjx.Data) -> mujoco.mjx.Data:
-        return mjdata
-    @classmethod
-    def get_randomized_model_params(cls, rng: jax.Array) -> dict[str, jax.Array]:
-        return {}
 
 
 class BipedSim:
@@ -211,8 +63,7 @@ class BipedSim:
     class BipedModel:
         mjmodel: mujoco.mjx.Model
 
-    def __init__(self, base_motion_cls: Type[BaseMotion] = MotionPlatform):
-        del base_motion_cls
+    def __init__(self):
         from mujoco.mjx._src import math as mjx_math
         import robot_learning.src.assets.biped.config as robot_config
 
@@ -229,17 +80,49 @@ class BipedSim:
         self._mjx_model = mujoco.mjx.put_model(self._model)
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
+        self._base_height_target = float(robot_config.DESIRED_HEIGHT)
+        self._max_foot_height = 0.15
+        self._soft_joint_pos_limit_factor = 0.95
+        self._reward_scales = {
+            "tracking_lin_vel": 2.0,
+            "tracking_ang_vel": 1.0,
+            "lin_vel_z": 0.0,
+            "ang_vel_xy": -0.15,
+            "orientation": -1.0,
+            "base_height": 0.0,
+            "torques": -2.5e-4,
+            "action_rate": -2e-4,
+            "feet_air_time": 2.0,
+            "feet_slip": -0.25,
+            "feet_height": 0.0,
+            "feet_phase": 1.0,
+            "alive": 0.0,
+            "termination": -1.0,
+            "joint_deviation_knee": -0.1,
+            "joint_deviation_hip": -0.25,
+            "dof_pos_limits": -1.0,
+            "pose": -1.0,
+        }
+
+        self._q_j_min, self._q_j_max = self._model.jnt_range[1:].T
+        c = (self._q_j_min + self._q_j_max) / 2
+        r = self._q_j_max - self._q_j_min
+        self._soft_q_j_min = c - 0.5 * r * self._soft_joint_pos_limit_factor
+        self._soft_q_j_max = c + 0.5 * r * self._soft_joint_pos_limit_factor
 
         self._feet_site_id = np.array([self._model.site(name).id for name in robot_config.FEET_SITES])
         self._feet_geom_id = np.array([self._model.geom(name).id for name in robot_config.FEET_GEOMS])
         self._floor_geom_id = self._model.geom("floor").id
-        foot_global_linvel_sensor_adr = []
-        for site in robot_config.FEET_SITES:
-            sensor_id = self._model.sensor(f"{site}_global_linvel").id
-            sensor_adr = self._model.sensor_adr[sensor_id]
-            sensor_dim = self._model.sensor_dim[sensor_id]
-            foot_global_linvel_sensor_adr.append(list(range(sensor_adr, sensor_adr + sensor_dim)))
-        self._foot_global_linvel_sensor_adr = jnp.array(foot_global_linvel_sensor_adr)
+
+        def get_joint_indices(joint_names, sides=robot_config.SIDES):
+            return jnp.array([
+                self._model.joint(f"{side}_{joint_name}").qposadr[0] - 7
+                for side in sides
+                for joint_name in joint_names
+            ])
+
+        self._hip_indices = get_joint_indices(robot_config.HIP_JOINT_NAMES)
+        self._knee_indices = get_joint_indices(robot_config.KNEE_JOINT_NAMES)
 
         self._sensor_adr = {}
         for name in [
@@ -253,6 +136,14 @@ class BipedSim:
             adr = self._model.sensor_adr[sid]
             dim = self._model.sensor_dim[sid]
             self._sensor_adr[name] = (adr, dim)
+
+        foot_global_linvel_sensor_adr = []
+        for site in robot_config.FEET_SITES:
+            sensor_id = self._model.sensor(f"{site}_global_linvel").id
+            sensor_adr = self._model.sensor_adr[sensor_id]
+            sensor_dim = self._model.sensor_dim[sensor_id]
+            foot_global_linvel_sensor_adr.append(list(range(sensor_adr, sensor_adr + sensor_dim)))
+        self._foot_global_linvel_sensor_adr = jnp.array(foot_global_linvel_sensor_adr)
 
         obs, _ = self.build_obs(self.reset(self.make_model(), jax.random.PRNGKey(0)), jax.random.PRNGKey(0))
         self.observation_space = gym.spaces.Box(low=-10.0, high=10.0, shape=obs.shape)
@@ -285,8 +176,14 @@ class BipedSim:
         lin_vel_x = jax.random.uniform(rng1, (), minval=-0.2, maxval=0.2)
         lin_vel_y = jax.random.uniform(rng2, (), minval=-0.2, maxval=0.2)
         ang_vel_yaw = jax.random.uniform(rng3, (), minval=-0.2, maxval=0.2)
-        return jnp.where(jax.random.bernoulli(rng4, p=0.1), jnp.zeros(3), jnp.array([lin_vel_x, lin_vel_y, ang_vel_yaw]))
 
+        # With 10% chance, set everything to zero.
+        return jnp.where(
+            jax.random.bernoulli(rng4, p=0.1),
+            jnp.zeros(3),
+            jnp.hstack([lin_vel_x, lin_vel_y, ang_vel_yaw]),
+        )
+        
     def reset(self, model: BipedModel, rng: jax.Array) -> BipedState:
         qpos = self._init_q
         qvel = jnp.zeros(model.mjmodel.nv)
@@ -363,8 +260,8 @@ class BipedSim:
         feet_pos = data.site_xpos[self._feet_site_id]
         swing_peak = jnp.maximum(state.swing_peak, feet_pos[..., -1])
 
-        reward = self._reward(data, action, state, first_contact, contact)
         done = self._termination(data)
+        reward = self._reward(data, action, state, first_contact, contact, done)
 
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
         current_obs = self._compute_current_obs(data, state.command, action, phase)
@@ -388,45 +285,95 @@ class BipedSim:
         gravity = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
         return (gravity[-1] < 0.0) | jnp.isnan(data.qpos).any() | jnp.isnan(data.qvel).any()
 
-    def _reward(self, data: mujoco.mjx.Data, action: jax.Array, state: BipedState, first_contact: jax.Array, contact: jax.Array) -> jax.Array:
+    def _reward(
+        self,
+        data: mujoco.mjx.Data,
+        action: jax.Array,
+        state: BipedState,
+        first_contact: jax.Array,
+        contact: jax.Array,
+        done: jax.Array,
+    ) -> jax.Array:
         cmd = state.command
         lin = self._sensor_data(data, self._robot_config.LOCAL_LINVEL_SENSOR)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
-        glin = self._sensor_data(data, self._robot_config.GLOBAL_LINVEL_SENSOR)
-        gang = self._sensor_data(data, self._robot_config.GLOBAL_ANGVEL_SENSOR)
+        global_linvel = self._sensor_data(data, self._robot_config.GLOBAL_LINVEL_SENSOR)
+        global_angular_vel = self._sensor_data(data, self._robot_config.GLOBAL_ANGVEL_SENSOR)
         grav = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
 
-        tracking_lin = jnp.exp(-jnp.sum(jnp.square(cmd[:2] - lin[:2])))
-        tracking_ang = jnp.exp(-jnp.square(cmd[2] - gyro[2]))
-        ang_vel_xy = jnp.sum(jnp.square(gang[:2]))
-        orientation = jnp.sum(jnp.square(grav[:2]))
-        torques = jnp.sum(jnp.abs(data.actuator_force))
-        action_rate = jnp.sum(jnp.square(action - state.last_act) / self.ctrl_dt)
+        # Tracking rewards.
+        tracking_lin = jnp.exp(-jnp.sum(jnp.square(cmd[:2] - lin[:2]))) # OK.
+        tracking_ang = jnp.exp(-jnp.square(cmd[2] - gyro[2])) # OK.
+        lin_vel_z = jnp.square(global_linvel[2])
+        ang_vel_xy = jnp.sum(jnp.square(global_angular_vel[:2])) # OK.
+        torso_zaxis = jnp.sum(jnp.square(grav[:2])) # OK.
+        base_height = jnp.square(data.qpos[2] - self._base_height_target)
+        
+        # Energy related rewards.
+        torques = jnp.sum(jnp.abs(data.actuator_force)) # OK.
+        action_rate = jnp.sum(jnp.square(action - state.last_act) / self.ctrl_dt) # OK.
+
+        # Feet related rewards.
         feet_vel_xy = data.sensordata[self._foot_global_linvel_sensor_adr][..., :2]
         feet_slip = jnp.sum(jnp.linalg.norm(feet_vel_xy, axis=-1) * contact)
-        feet_air_time = jnp.sum(jnp.clip((state.feet_air_time - 0.2) * first_contact, max=0.3))
-        alive = 1.0
+
+        cmd_norm = jnp.linalg.norm(cmd)
+        threshold_min = 0.2; 
+        threshold_max = 0.5
+        air_time = (state.feet_air_time - threshold_min) * first_contact
+        air_time = jnp.clip(air_time, max=threshold_max - threshold_min)
+        feet_air_time = jnp.sum(air_time)
+        feet_air_time *= cmd_norm > 0.1  # No reward for zero commands.
+
+        feet_height_error = state.swing_peak / self._max_foot_height - 1.0
+        feet_height = jnp.sum(jnp.square(feet_height_error) * first_contact)
+
+        foot_pos = data.site_xpos[self._feet_site_id]
+        foot_z = foot_pos[..., -1]
+        rz = utils.get_rz(state.phase, swing_height=self._max_foot_height)
+        error = jnp.sum(jnp.square(foot_z - rz))
+        feet_phase = jnp.exp(-error / 0.01)
+
+        joint_deviation_hip = jnp.sum(
+            jnp.abs(data.qpos[7:][self._hip_indices] - self._default_q_joints[self._hip_indices])
+        ) * (jnp.abs(cmd[1]) > 0.1)
+        joint_deviation_knee = jnp.sum(
+            jnp.abs(data.qpos[7:][self._knee_indices] - self._default_q_joints[self._knee_indices])
+        )
+        out_of_limits = -jnp.clip(data.qpos[7:] - self._soft_q_j_min, None, 0.0)
+        out_of_limits += jnp.clip(data.qpos[7:] - self._soft_q_j_max, 0.0, None)
+        dof_pos_limits = jnp.sum(out_of_limits)
+
+        # Keep the robot close to the default pose.
         pose = jnp.sum(jnp.square(data.qpos[7:] - self._default_q_joints))
 
-        total = (
-            2.0 * tracking_lin +
-            1.0 * tracking_ang -
-            0.15 * ang_vel_xy -
-            1.0 * orientation -
-            2.5e-4 * torques -
-            2e-4 * action_rate -
-            0.25 * feet_slip +
-            2.0 * feet_air_time +
-            0.0 * glin[2] +
-            0.0 * alive -
-            1.0 * pose
-        )
+        reward_terms = {
+            "tracking_lin_vel": tracking_lin,
+            "tracking_ang_vel": tracking_ang,
+            "lin_vel_z": lin_vel_z,
+            "ang_vel_xy": ang_vel_xy,
+            "orientation": torso_zaxis,
+            "base_height": base_height,
+            "torques": torques,
+            "action_rate": action_rate,
+            "feet_air_time": feet_air_time,
+            "feet_slip": feet_slip,
+            "feet_height": feet_height,
+            "feet_phase": feet_phase,
+            "alive": jnp.array(1.0),
+            "termination": done,
+            "joint_deviation_knee": joint_deviation_knee,
+            "joint_deviation_hip": joint_deviation_hip,
+            "dof_pos_limits": dof_pos_limits,
+            "pose": pose,
+        }
+        total = sum(self._reward_scales[k] * v for k, v in reward_terms.items())
         return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0)
 
     def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[jax.Array, dict]:
         del rng
         hist = RingBuffer.get(state.obs_history, jnp.arange(self.history_len)).reshape(-1)
-        obs = hist[::-1]
+        obs = hist[::-1] # Most recent observation first.
         info = {
             "state": state,
             "obs": obs,
@@ -546,35 +493,6 @@ class VectorEnv(gym.vector.VectorEnv):
         return images
 
 
-
-class SaveVideoWrapper(gym.vector.vector_env.VectorWrapper):
-    def __init__(self, env, video_path, nb_envs_to_render=16, nb_steps_per_video=400):
-        super().__init__(env)
-        self.video_path = video_path
-        self.frames = []
-        self.nb_envs_to_render = nb_envs_to_render
-        self.counter = 0
-        self.nb_steps_per_video = nb_steps_per_video
-        self.step_counter = 0
-
-    def step(self, actions: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, dict]:
-        obs, reward, terminated, truncated, info = self.env.step(actions)
-        self.step_counter += 1
-        if self.step_counter <= self.nb_steps_per_video:
-            self.frames.append(tile_images(self.env.render(self.nb_envs_to_render)))
-        elif self.frames:
-            save_video(self.frames, self.video_path + f"/video_{self.counter:04d}.mp4", fps=1/self.env.dt)
-            self.counter += 1
-            self.frames = []
-        else:
-            pass
-        return obs, reward, terminated, truncated, info
-
-    def reset(self, seed: int = None, options: dict = {}) -> tuple[jax.Array, dict]:
-        obs, info = self.env.reset(seed, options)
-        self.step_counter = 0
-        self.frames = []
-        return obs, info
 
 if __name__ == "__main__":
     print("building sim")
