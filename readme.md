@@ -2,40 +2,52 @@
 
 <img src="./videos/video.gif" width="400"/>
 
-# Run the robot with the keyboard
-
-<img src="./videos/video_joystick.gif" width="400"/>
-
-```
-cd robot_learning/src/jax/envs
-mjpython biped_test.py
-```
-
-Note: on MacOS you will likely need to whitelist both the terminal and the mjpython executable for input monitoring.
-In System Settings, navigate to Privacy & Security -> Input Monitoring, then add your terminal and mjpython (cmd+shift+G in the file browser will let you add a path).
-
 ## Install requirements
 
 Tested on Python 3.12.
 
+Create and activate a virtual environment at the repo root:
+
 ```
-pip3 install -r requirements.txt
+python3.12 -m venv .venv
+source .venv/bin/activate   # Linux/macOS
+```
+
+You can also use conda to create the environment:
+
+```
+conda create -n biped-learning python=3.12
+conda activate biped-learning
+```
+
+Install dependencies:
+
+```
+pip install -U pip
+pip install -r requirements.txt
 ```
 
 ## Install the repo
 
+With the venv activated:
+
 ```
-pip3 install -e .
+pip install -e .
 ```
 
-## Run biped learning code in Jax
+## Run biped learning code in Jax (Brax implementation of PPO)
 
 ```
 cd src/jax
-python3 train.py
+./train.sh
 ```
-Inference: test.ipynb
 
+## Run biped learning code in Jax Simplified (PyTorch implementation of PPO)
+
+```
+cd src/jax_simplified
+./run.sh
+```
 
 
 ## File structure
@@ -53,9 +65,26 @@ robot_learning
                 └── utils.py                   (utils)
             └── assets
                 └── biped                      (biped)
-
-    └── tests
+            └── jax_simplified
+                └── run.sh                   (run the code)
+                └── skrl_ppo_pytorch.py      (PPO implementation in PyTorch)
+                └── envs
+                    └── biped.py             (Biped environment)
+                └── utils.py                (utils)
 ```
 
 
 This project uses/derives from MuJoCo Playground (Apache 2.0) by Google DeepMind.
+
+
+# Run the robot with the keyboard
+
+<img src="./videos/video_joystick.gif" width="400"/>
+
+```
+cd robot_learning/src/jax/envs
+mjpython biped_test.py
+```
+
+Note: on MacOS you will likely need to whitelist both the terminal and the mjpython executable for input monitoring.
+In System Settings, navigate to Privacy & Security -> Input Monitoring, then add your terminal and mjpython (cmd+shift+G in the file browser will let you add a path).
