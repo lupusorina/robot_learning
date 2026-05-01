@@ -185,11 +185,8 @@ class Biped(mjx_env.MjxEnv):
     # MuJoCo actuator mapping.
     self.joint_names_to_actuator_idx_dict = { name: int(self.mj_model.joint(name).qposadr[0] - 7) \
                                               for name in self.idx_actuators_dict.keys() }
-    print('self.joint_names_to_actuator_idx_dict: ', self.joint_names_to_actuator_idx_dict)
     self.policy_idx_to_mujoco_actuator_idx_dict = { self.actuated_joint_names_to_policy_idx_dict[name]: self.joint_names_to_actuator_idx_dict[name] 
                                  for name in self.actuated_joint_names_to_policy_idx_dict }
-    
-    print('self.policy_idx_to_mujoco_actuator_idx_dict: ', self.policy_idx_to_mujoco_actuator_idx_dict)
 
     # Initial configuration.
     dict_initial_qpos = {}
