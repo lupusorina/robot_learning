@@ -16,6 +16,8 @@ from flax import struct
 import gymnasium as gym
 import jax.numpy as jnp
 from jax.scipy.spatial.transform import Rotation as R
+from mujoco.mjx._src import math as mjx_math
+import robot_learning.src.assets.biped.config as robot_config
 
 # Custom imports.
 import utils
@@ -64,8 +66,6 @@ class BipedSim:
         mjmodel: mujoco.mjx.Model
 
     def __init__(self):
-        from mujoco.mjx._src import math as mjx_math
-        import robot_learning.src.assets.biped.config as robot_config
 
         self._mjx_math = mjx_math
         self._robot_config = robot_config
@@ -123,6 +123,29 @@ class BipedSim:
 
         self._hip_indices = get_joint_indices(robot_config.HIP_JOINT_NAMES)
         self._knee_indices = get_joint_indices(robot_config.KNEE_JOINT_NAMES)
+
+        # Mapping from joint names to the PPO action indices.
+        # Initialize the action space.
+        self.idx_actuators_dict = {}
+        for i in range(0, self._model.nu):
+            self.idx_actuators_dict[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)] = i
+
+        self.actuated_joint_names_to_policy_idx_dict = {
+            "L_HAA": 0,
+            "L_HFE": 1,
+            "L_KFE": 2,
+            "R_HAA": 3,
+            "R_HFE": 4,
+            "R_KFE": 5,
+            }
+        for name in self.actuated_joint_names_to_policy_idx_dict:
+            assert name in self.idx_actuators_dict, f"{name} is not in {self.idx_actuators_dict.keys()}"
+
+        # MuJoCo actuator mapping.
+        self.joint_names_to_actuator_idx_dict = { name: int(self._model.joint(name).qposadr[0] - 7) \
+                                                for name in self.idx_actuators_dict.keys() }
+        self.policy_idx_to_mujoco_actuator_idx_dict = { self.actuated_joint_names_to_policy_idx_dict[name]: self.joint_names_to_actuator_idx_dict[name] 
+                                    for name in self.actuated_joint_names_to_policy_idx_dict }
 
         self._sensor_adr = {}
         for name in [
@@ -246,7 +269,15 @@ class BipedSim:
         ]).clip(-10.0, 10.0)
 
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
-        motor_targets = self._default_q_joints + action
+         # Step the model.
+        action_complete = jnp.zeros(self._model.nu)
+        for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
+            if policy_idx is None:
+                continue
+        action_complete = action_complete.at[self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]].set(action[policy_idx])
+
+        motor_targets = self._default_q_joints + action_complete
+
         data = state.mjdata
 
         def sim_step(d, _):
@@ -429,7 +460,6 @@ class VectorEnv(gym.vector.VectorEnv):
                 return jnp.where(jnp.reshape(reset_mask, [reset_mask.shape[0]] + [1]*(len(x.shape) -1)), y, x)
             return jax.tree_util.tree_map(reset_if_done, states, reset_states)
         def vmapped_step(model, states, actions):
-            print("tracing step")
             return jax.vmap(self.sim.step, in_axes=[self.model_batch_axes, 0, 0])(model, states, actions)
         def vmapped_build_obs(state, rng):
             rng = jax.random.split(rng, self.num_envs)
