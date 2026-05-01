@@ -14,6 +14,7 @@ import mujoco.mjx
 import numpy as np
 from flax import struct
 import gymnasium as gym
+from gymnasium.vector.utils import batch_space
 import jax.numpy as jnp
 from jax.scipy.spatial.transform import Rotation as R
 from mujoco.mjx._src import math as mjx_math
@@ -59,7 +60,9 @@ class BipedSim:
         step_count: jax.Array
         reward: jax.Array
         done: jax.Array
+        truncated: jax.Array
         obs_history: RingBuffer
+        privileged_obs_history: RingBuffer
 
     @struct.dataclass
     class BipedModel:
@@ -76,6 +79,8 @@ class BipedSim:
         self._n_substeps = int(round(self.ctrl_dt / self._sim_dt))
         self.dt = self.ctrl_dt
         self.history_len = 3
+        # Control-step limit per episode (truncation, not failure).
+        self.max_episode_steps = 1000
 
         self._mjx_model = mujoco.mjx.put_model(self._model)
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
@@ -154,6 +159,7 @@ class BipedSim:
             robot_config.GYRO_SENSOR,
             robot_config.GLOBAL_LINVEL_SENSOR,
             robot_config.GLOBAL_ANGVEL_SENSOR,
+            robot_config.ACCELEROMETER_SENSOR,
         ]:
             sid = self._model.sensor(name).id
             adr = self._model.sensor_adr[sid]
@@ -169,7 +175,14 @@ class BipedSim:
         self._foot_global_linvel_sensor_adr = jnp.array(foot_global_linvel_sensor_adr)
 
         obs, _ = self.build_obs(self.reset(self.make_model(), jax.random.PRNGKey(0)), jax.random.PRNGKey(0))
-        self.observation_space = gym.spaces.Box(low=-10.0, high=10.0, shape=obs.shape)
+        self.observation_space = gym.spaces.Dict(
+            {
+                "state": gym.spaces.Box(low=-10.0, high=10.0, shape=obs["state"].shape),
+                "privileged_state": gym.spaces.Box(
+                    low=-10.0, high=10.0, shape=obs["privileged_state"].shape
+                ),
+            }
+        )
 
     def _sensor_data(self, data: mujoco.mjx.Data, sensor_name: str) -> jax.Array:
         adr, dim = self._sensor_adr[sensor_name]
@@ -233,6 +246,18 @@ class BipedSim:
         phase_dt = 2 * jnp.pi * self.ctrl_dt * jax.random.uniform(key, (1,), minval=1.25, maxval=1.5)
         current_obs = self._compute_current_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase)
         obs_hist = RingBuffer.init(current_obs, self.history_len)
+        contact0 = jnp.array(
+            [self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id]
+        )
+        current_priv = self._compute_current_privileged_obs(
+            data,
+            command,
+            jnp.zeros(self.action_space.shape[0]),
+            phase,
+            contact0,
+            jnp.zeros(2),
+        )
+        priv_hist = RingBuffer.init(current_priv, self.history_len)
 
         return self.BipedState(
             mjdata=data,
@@ -247,7 +272,9 @@ class BipedSim:
             step_count=jnp.array(0, dtype=jnp.int32),
             reward=jnp.array(0.0),
             done=jnp.array(False),
+            truncated=jnp.array(False),
             obs_history=obs_hist,
+            privileged_obs_history=priv_hist,
         )
 
     def _compute_current_obs(self, data: mujoco.mjx.Data, command: jax.Array, last_act: jax.Array, phase: jax.Array) -> jax.Array:
@@ -268,13 +295,53 @@ class BipedSim:
             ph,
         ]).clip(-10.0, 10.0)
 
+    def _compute_current_privileged_obs(
+        self,
+        data: mujoco.mjx.Data,
+        command: jax.Array,
+        last_act: jax.Array,
+        phase: jax.Array,
+        contact: jax.Array,
+        feet_air_time: jax.Array,
+    ) -> jax.Array:
+        """Privileged features for the value function: policy state plus clean proprioceptive / sim signals."""
+        current_state = self._compute_current_obs(data, command, last_act, phase)
+        gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
+        accelerometer = self._sensor_data(data, self._robot_config.ACCELEROMETER_SENSOR)
+        up_B = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
+        linvel = self._sensor_data(data, self._robot_config.LOCAL_LINVEL_SENSOR)
+        global_angvel = self._sensor_data(data, self._robot_config.GLOBAL_ANGVEL_SENSOR)
+        q_joints = data.qpos[7:]
+        q_vel = data.qvel[6:]
+        baselink_height = data.qpos[2]
+        feet_vel_I = data.sensordata[self._foot_global_linvel_sensor_adr].ravel()
+        return jnp.concatenate(
+            [
+                current_state,
+                gyro,
+                accelerometer,
+                up_B,
+                linvel,
+                global_angvel,
+                q_joints - self._default_q_joints,
+                q_vel,
+                jnp.array([baselink_height]),
+                data.actuator_force,
+                contact.astype(jnp.float32),
+                feet_vel_I,
+                feet_air_time,
+            ]
+        ).clip(-10.0, 10.0)
+
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
          # Step the model.
         action_complete = jnp.zeros(self._model.nu)
         for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
             if policy_idx is None:
                 continue
-        action_complete = action_complete.at[self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]].set(action[policy_idx])
+            action_complete = action_complete.at[
+                self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]
+            ].set(action[policy_idx])
 
         motor_targets = self._default_q_joints + action_complete
 
@@ -287,29 +354,43 @@ class BipedSim:
 
         data, _ = jax.lax.scan(sim_step, data, (), self._n_substeps)
         contact = jnp.array([self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id])
-        first_contact = (state.feet_air_time > 0.0) * (contact | state.last_contact)
+        contact_filt = contact | state.last_contact
+        first_contact = (state.feet_air_time > 0.0) * contact_filt
+        feet_air_time = state.feet_air_time + self.ctrl_dt
         feet_pos = data.site_xpos[self._feet_site_id]
         swing_peak = jnp.maximum(state.swing_peak, feet_pos[..., -1])
 
-        done = self._termination(data)
-        reward = self._reward(data, action, state, first_contact, contact, done)
+        terminated = self._termination(data)
+        reward = self._reward(data, action, state, first_contact, contact, terminated)
+
+        new_step_count = state.step_count + 1
+        truncated = new_step_count >= self.max_episode_steps
+        step_count = jnp.where(terminated | truncated, 0, new_step_count)
 
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
+        feet_air_time = feet_air_time * (~contact)
+        swing_peak = swing_peak * (~contact)
         current_obs = self._compute_current_obs(data, state.command, action, phase)
         obs_hist = RingBuffer.push(state.obs_history, current_obs)
+        current_priv = self._compute_current_privileged_obs(
+            data, state.command, action, phase, contact, feet_air_time
+        )
+        priv_hist = RingBuffer.push(state.privileged_obs_history, current_priv)
 
         return state.replace(
             mjdata=data,
             last_last_act=state.last_act,
             last_act=action,
             phase=phase,
-            feet_air_time=jnp.where(contact, 0.0, state.feet_air_time + self.ctrl_dt),
+            feet_air_time=feet_air_time,
             last_contact=contact,
-            swing_peak=jnp.where(contact, 0.0, swing_peak),
-            step_count=jnp.where(done | (state.step_count > 500), 0, state.step_count + 1),
+            swing_peak=swing_peak,
+            step_count=step_count,
             reward=reward,
-            done=done,
+            done=terminated,
+            truncated=truncated,
             obs_history=obs_hist,
+            privileged_obs_history=priv_hist,
         )
 
     def _termination(self, data: mujoco.mjx.Data) -> jax.Array:
@@ -401,20 +482,24 @@ class BipedSim:
         total = sum(self._reward_scales[k] * v for k, v in reward_terms.items())
         return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0)
 
-    def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[jax.Array, dict]:
+    def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[dict, dict]:
         del rng
         hist = RingBuffer.get(state.obs_history, jnp.arange(self.history_len)).reshape(-1)
-        obs = hist[::-1] # Most recent observation first.
+        policy_obs = hist[::-1]  # Most recent observation first.
+        priv_hist = RingBuffer.get(state.privileged_obs_history, jnp.arange(self.history_len)).reshape(-1)
+        privileged_obs = priv_hist[::-1]
+        obs = {"state": policy_obs, "privileged_state": privileged_obs}
         info = {
             "state": state,
-            "obs": obs,
+            "obs": policy_obs,
             "benchmark_reward": state.reward,
+            "contact": state.last_contact,
         }
         return obs, info
 
     def get_reward(self, info: dict) -> tuple[jax.Array, jax.Array, jax.Array]:
         s = info["state"]
-        return s.reward, s.done, jnp.array(False)
+        return s.reward, s.done, s.truncated
 
     def get_renderer(self, randomized_params: dict[str, jax.Array] = {}) -> MjxRenderer:
         del randomized_params
@@ -430,9 +515,14 @@ class VectorEnv(gym.vector.VectorEnv):
     def __init__(self, sim, num_envs=1, seed=0, backend=None):
         self.render_mode = "rgb_array"
         self.dt = sim.dt
-        self.metadata = {"autoreset_mode": gym.vector.AutoresetMode.NEXT_STEP}
+        self.metadata = {
+            "autoreset_mode": gym.vector.AutoresetMode.NEXT_STEP,
+            "max_episode_steps": sim.max_episode_steps,
+        }
         self.single_observation_space = sim.observation_space
+        self.observation_space = batch_space(self.single_observation_space, num_envs)
         self.single_action_space = sim.action_space
+        self.action_space = batch_space(self.single_action_space, num_envs)
         self.rng = jax.random.PRNGKey(seed)
         self.sim = sim
         self.num_envs = num_envs
@@ -480,7 +570,11 @@ class VectorEnv(gym.vector.VectorEnv):
         self._vmapped_randomize_model = jax.jit(vmapped_randomize_model, backend=backend)
         self._vmapped_get_render_state = jax.jit(vmapped_get_render_state, backend=backend)
 
-    def reset(self, seed: int = None, options: dict = {}) -> tuple[jax.Array, dict]:
+    @staticmethod
+    def _obs_to_numpy(obs):
+        return {k: np.asarray(v) for k, v in obs.items()}
+
+    def reset(self, seed: int = None, options: dict = {}) -> tuple[dict, dict]:
         if seed is not None:
             self.rng = jax.random.PRNGKey(seed)
         self.randomize_model()
@@ -490,21 +584,21 @@ class VectorEnv(gym.vector.VectorEnv):
         self.reset_next = jnp.zeros(self.num_envs, dtype=jnp.bool_)
         self.rng, key = jax.random.split(self.rng)
         obs, info = self._vmapped_build_obs(self.states, key)
-        return np.array(obs), info
+        return self._obs_to_numpy(obs), info
 
     def randomize_model(self):
         self.rng, key = jax.random.split(self.rng)
         self.model, self.randomized_params = self._vmapped_randomize_model(self.model, key)
         self.renderers = [] # clear renderers
 
-    def step(self, actions: jax.Array) -> tuple[jax.Array, jax.Array, jax.Array, jax.Array, dict]:
+    def step(self, actions: jax.Array) -> tuple[dict, jax.Array, jax.Array, jax.Array, dict]:
         self.states = self._vmapped_step(self.model, self.states, actions)
         self.states = self._vmapped_autoreset(self.reset_next, self.states, self.reset_states)
         self.rng, key = jax.random.split(self.rng)
         obs, info = self._vmapped_build_obs(self.states, key)
         reward, terminated, truncated = self._vmapped_get_reward(info)
         self.reset_next = terminated | truncated
-        return np.array(obs), np.array(reward), np.array(terminated), np.array(truncated), info
+        return self._obs_to_numpy(obs), np.array(reward), np.array(terminated), np.array(truncated), info
 
     def render(self, max_render_envs=16):
         nb_render_envs = int(min(max_render_envs, self.num_envs))
@@ -531,8 +625,7 @@ if __name__ == "__main__":
     start_build_time = time.time()
     env = VectorEnv(sim, num_envs=1024)
     obs, info = env.reset()
-    # print(obs)
-    # print(info)
+    assert set(obs.keys()) == {"state", "privileged_state"}
 
     obs, reward, terminated, truncated, info = env.step(jnp.zeros([env.num_envs, sim.action_space.shape[0]]))
     print("step done")
