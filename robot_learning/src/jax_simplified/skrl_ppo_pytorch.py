@@ -4,65 +4,27 @@ import torch
 import torch.nn as nn
 import numpy as np
 
-from skrl.agents.torch.ppo import PPO, PPO_DEFAULT_CONFIG
+from skrl.agents.torch.ppo import PPO_DEFAULT_CONFIG
 from skrl.envs.wrappers.torch import wrap_env
-from skrl.memories.torch import RandomMemory
-from skrl.models.torch import DeterministicMixin, GaussianMixin, Model
-from skrl.resources.preprocessors.torch import RunningStandardScaler
-from skrl.resources.schedulers.torch import KLAdaptiveRL
-from skrl.trainers.torch import SequentialTrainer, StepTrainer
 from skrl.utils import set_seed
+from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space
 import cleanrl_ppo
 from utils import tile_images, save_video, SaveVideoWrapper
+import pandas as pd
 
 
-
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
-    torch.nn.init.constant_(layer.bias, bias_const)
-    return layer
-
-class Policy(GaussianMixin, Model):
-    def __init__(self, observation_space, action_space, device, clip_actions=False,
-                 clip_log_std=True, min_log_std=-20, max_log_std=2, reduction="sum"):
-        Model.__init__(self, observation_space, action_space, device)
-        GaussianMixin.__init__(self, clip_actions, clip_log_std, min_log_std, max_log_std, reduction)
-
-        self.net = nn.Sequential(layer_init(nn.Linear(self.num_observations, 64)),
-                                 nn.LayerNorm(64),
-                                 nn.Tanh(),
-                                 layer_init(nn.Linear(64, 64)),
-                                 nn.LayerNorm(64),
-                                 nn.Tanh(),
-                                 layer_init(nn.Linear(64, self.num_actions), std=0.01))
-        self.log_std_parameter = nn.Parameter(torch.zeros(self.num_actions))
-
-    def compute(self, inputs, role):
-        return self.net(inputs["states"]), self.log_std_parameter, {}
-
-class Value(DeterministicMixin, Model):
-    def __init__(self, observation_space, action_space, device, clip_actions=False):
-        Model.__init__(self, observation_space, action_space, device)
-        DeterministicMixin.__init__(self, clip_actions)
-
-        self.net = nn.Sequential(layer_init(nn.Linear(self.num_observations, 64)),
-                                 nn.LayerNorm(64),
-                                 nn.Tanh(),
-                                 layer_init(nn.Linear(64, 64)),
-                                 nn.LayerNorm(64),
-                                 nn.Tanh(),
-                                 layer_init(nn.Linear(64, 1), std=1.0))
-
-    def compute(self, inputs, role):
-        return self.net(inputs["states"]), {}
-
+def observation_to_agent_tensor(obs, observation_space, device):
+    """Map reset/step observations to a flat batch tensor (Dict obs: sorted keys, same as skrl / cleanrl_pPO)."""
+    if isinstance(obs, torch.Tensor):
+        return obs
+    return flatten_tensorized_space(tensorize_space(observation_space, obs, device=device))
 
 cfg = PPO_DEFAULT_CONFIG.copy()
 cfg["rollouts"] = 1024  # memory_size
 cfg["learning_epochs"] = 10
 cfg["mini_batches"] = 32
 cfg["discount_factor"] = 0.99
-cfg["time_limit_bootstrap"] = False # default is False
+cfg["time_limit_bootstrap"] = True
 cfg["lambda"] = 0.95
 cfg["learning_rate"] = 3e-4
 # cfg["learning_rate_scheduler"] = KLAdaptiveRL
@@ -83,23 +45,6 @@ cfg["mixed_precision"] = False
 cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs/biped"
-
-
-def make_skrl_agent(experiment_name, env, device):
-    cfg["experiment"]["experiment_name"] = experiment_name
-
-    memory = RandomMemory(memory_size=1024, num_envs=env.num_envs, device=device)
-
-    models = {}
-    models["policy"] = Policy(env.observation_space, env.action_space, device, clip_actions=False)
-    models["value"] = Value(env.observation_space, env.action_space, device)
-    agent = PPO(models=models,
-                memory=memory,
-                cfg=cfg,
-                observation_space=env.observation_space,
-                action_space=env.action_space,
-                device=device)
-    return agent
 
 
 import os
@@ -163,7 +108,7 @@ if __name__ == "__main__":
     if env_name == "biped":
         import envs.biped as biped
         env = biped.VectorEnv(biped.BipedSim(), num_envs=2048)
-        # env = SaveVideoWrapper(env, f"videos/biped_{experiment_name}")
+        env = SaveVideoWrapper(env, f"videos/biped_{experiment_name}")
     else:
         env = gym.make_vec(env_name, num_envs=100, vectorization_mode="sync")
     env_not_wrapped = env
@@ -174,18 +119,18 @@ if __name__ == "__main__":
     print(f"action space: {env.action_space}")
     print(f"device: {device}")
 
-    # agent = make_skrl_agent(experiment_name, env, device)
     ppo_args = cleanrl_ppo.Args()
     ppo_args.seed = seed
     agent = cleanrl_ppo.PPO(env, ppo_args, cfg)
 
     if cli_args.eval:
+        print(f"Loading checkpoint from: {cli_args.eval}")
         agent.set_running_mode("eval")
         agent.load(cli_args.eval)
         eval_timesteps = 1000
         rewards = torch.zeros(eval_timesteps, env.num_envs)
         obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs
-        obs = torch.tensor(obs, device=device)
+        obs = observation_to_agent_tensor(obs, env.observation_space, device)
         frames = []
         for i in tqdm.trange(eval_timesteps, desc="Evaluating"):
             with torch.no_grad():
@@ -215,10 +160,11 @@ if __name__ == "__main__":
         nb_iterations = nb_timesteps // cfg["rollouts"]
         agent.set_running_mode("train")
         timestep = 0
+        average_reward_list = []
         for iteration in range(1, nb_iterations + 1):
             # Reset domain randomization
             obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs
-            obs = torch.tensor(obs, device=device)
+            obs = observation_to_agent_tensor(obs, env.observation_space, device)
             rollout_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
             rollout_benchmark_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
             for i in tqdm.trange(cfg["rollouts"], desc=f"Iteration {iteration}/{nb_iterations}"):
@@ -243,6 +189,10 @@ if __name__ == "__main__":
                 obs = next_obs
                 timestep += 1
             average_reward = rollout_rewards.mean()
+            average_reward_list.append(average_reward)
+            # Save to csv file.
+            pd.DataFrame(average_reward_list,
+                         columns=["average_reward"]).to_csv(f"runs/{experiment_name}/average_reward.csv", index=False)
             print(f"Average reward: {average_reward}")
             agent.track_data(f"Reward / Average reward", average_reward)
             agent.track_data(f"Reward / Average benchmark reward", rollout_benchmark_rewards.mean())
