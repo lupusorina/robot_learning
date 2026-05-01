@@ -82,7 +82,7 @@ cfg["mixed_precision"] = False
 # logging to TensorBoard and write checkpoints (in timesteps)
 cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
-cfg["experiment"]["directory"] = "runs/crane"
+cfg["experiment"]["directory"] = "runs/biped"
 
 
 def make_skrl_agent(experiment_name, env, device):
