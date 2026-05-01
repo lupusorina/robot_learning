@@ -49,6 +49,16 @@ cd src/jax_simplified
 ./run.sh
 ```
 
+Enable Weights & Biases logging (optional):
+
+```
+cd robot_learning/src/jax_simplified
+python skrl_ppo_pytorch.py \
+  --train biped \
+  --wandb \
+  --video
+```
+
 
 ## File structure
 

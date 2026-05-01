@@ -59,6 +59,7 @@ class BipedSim:
         swing_peak: jax.Array
         step_count: jax.Array
         reward: jax.Array
+        reward_terms: dict
         done: jax.Array
         truncated: jax.Array
         obs_history: RingBuffer
@@ -259,6 +260,9 @@ class BipedSim:
         )
         priv_hist = RingBuffer.init(current_priv, self.history_len)
 
+        # Keep a fixed reward_terms pytree structure for JIT.
+        reward_terms = {k: jnp.array(0.0) for k in self._reward_scales.keys()}
+
         return self.BipedState(
             mjdata=data,
             command=command,
@@ -271,6 +275,7 @@ class BipedSim:
             swing_peak=jnp.zeros(2),
             step_count=jnp.array(0, dtype=jnp.int32),
             reward=jnp.array(0.0),
+            reward_terms=reward_terms,
             done=jnp.array(False),
             truncated=jnp.array(False),
             obs_history=obs_hist,
@@ -361,7 +366,7 @@ class BipedSim:
         swing_peak = jnp.maximum(state.swing_peak, feet_pos[..., -1])
 
         terminated = self._termination(data)
-        reward = self._reward(data, action, state, first_contact, contact, terminated)
+        reward, reward_terms = self._reward(data, action, state, first_contact, contact, terminated)
 
         new_step_count = state.step_count + 1
         truncated = new_step_count >= self.max_episode_steps
@@ -387,6 +392,7 @@ class BipedSim:
             swing_peak=swing_peak,
             step_count=step_count,
             reward=reward,
+            reward_terms=reward_terms,
             done=terminated,
             truncated=truncated,
             obs_history=obs_hist,
@@ -405,7 +411,7 @@ class BipedSim:
         first_contact: jax.Array,
         contact: jax.Array,
         done: jax.Array,
-    ) -> jax.Array:
+    ) -> tuple[jax.Array, dict]:
         cmd = state.command
         lin = self._sensor_data(data, self._robot_config.LOCAL_LINVEL_SENSOR)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
@@ -479,8 +485,9 @@ class BipedSim:
             "dof_pos_limits": dof_pos_limits,
             "pose": pose,
         }
-        total = sum(self._reward_scales[k] * v for k, v in reward_terms.items())
-        return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0)
+        reward_terms = {k: self._reward_scales[k] * v for k, v in reward_terms.items()}
+        total = sum(reward_terms.values())
+        return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0), reward_terms
 
     def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[dict, dict]:
         del rng
@@ -494,6 +501,7 @@ class BipedSim:
             "obs": policy_obs,
             "benchmark_reward": state.reward,
             "contact": state.last_contact,
+            "reward_terms": state.reward_terms,
         }
         return obs, info
 
@@ -600,11 +608,10 @@ class VectorEnv(gym.vector.VectorEnv):
         self.reset_next = terminated | truncated
         return self._obs_to_numpy(obs), np.array(reward), np.array(terminated), np.array(truncated), info
 
-    def render(self, max_render_envs=16):
+    def render(self, max_render_envs=4):
         nb_render_envs = int(min(max_render_envs, self.num_envs))
         if len(self.renderers) < nb_render_envs:
             for i in range(len(self.renderers), nb_render_envs):
-                print(f"creating renderer for env {i}")
                 renderer = self.sim.get_renderer(
                     jax.tree_util.tree_map(lambda x: x[i], self.randomized_params)
                 )
