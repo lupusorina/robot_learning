@@ -54,7 +54,6 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-
 def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
     torch.nn.init.orthogonal_(layer.weight, std)
     torch.nn.init.constant_(layer.bias, bias_const)
@@ -62,40 +61,68 @@ def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
 
 
 class Agent(nn.Module):
+    """Actor sees policy ``state``; critic sees ``privileged_state`` (asymmetric PPO) when obs is a Dict."""
+
     def __init__(self, envs):
         super().__init__()
+        ss = envs.observation_space
+        if isinstance(ss, gym.spaces.Dict):
+            self._priv_dim = int(np.prod(ss["privileged_state"].shape))
+            self._policy_dim = int(np.prod(ss["state"].shape))
+        else:
+            self._priv_dim = None
+            self._policy_dim = int(np.prod(ss.shape))
+        act_dim = int(np.prod(envs.action_space.shape))
+        critic_in = self._priv_dim if self._priv_dim is not None else self._policy_dim
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 1), std=1.0),
+            layer_init(nn.Linear(critic_in, 512)),
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            layer_init(nn.Linear(512, 256)),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            layer_init(nn.Linear(256, 128)),
+            nn.LayerNorm(128),
+            nn.SiLU(),
+            layer_init(nn.Linear(128, 1), std=1.0),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(np.array(envs.single_observation_space.shape).prod(), 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, 64)),
-            nn.Tanh(),
-            layer_init(nn.Linear(64, np.prod(envs.single_action_space.shape)), std=0.01),
+            layer_init(nn.Linear(self._policy_dim, 512)),
+            nn.LayerNorm(512),
+            nn.SiLU(),
+            layer_init(nn.Linear(512, 256)),
+            nn.LayerNorm(256),
+            nn.SiLU(),
+            layer_init(nn.Linear(256, 128)),
+            nn.LayerNorm(128),
+            nn.SiLU(),
+            layer_init(nn.Linear(128, act_dim), std=0.01),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.single_action_space.shape)))
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
+
+    def _policy_value_obs(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._priv_dim is not None:
+            # skrl / gymnasium flatten order: sorted keys -> privileged_state, then state
+            return x[:, self._priv_dim :], x[:, : self._priv_dim]
+        return x, x
 
     def get_value(self, x):
-        return self.critic(x)
+        _, value_x = self._policy_value_obs(x)
+        return self.critic(value_x)
 
     def get_action_and_value(self, x, action=None):
         # Check for invalid values in input
         if torch.isnan(x).any() or torch.isinf(x).any():
             print(f"Warning: Invalid values in input x. NaN: {torch.isnan(x).sum()}, Inf: {torch.isinf(x).sum()}")
             x = torch.nan_to_num(x, nan=0.0, posinf=10.0, neginf=-10.0)
-        
-        action_mean = self.actor_mean(x)
+        policy_x, value_x = self._policy_value_obs(x)
+        action_mean = self.actor_mean(policy_x)
         action_logstd = self.actor_logstd.expand_as(action_mean)
         action_std = torch.exp(action_logstd)
         probs = Normal(action_mean, action_std)
         if action is None:
             action = probs.sample()
-        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(x)
+        return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(value_x)
 
 
 class PPO(skrl.agents.torch.Agent):
@@ -107,7 +134,6 @@ class PPO(skrl.agents.torch.Agent):
         self.minibatch_size = int(self.batch_size // args.num_minibatches)
         device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
         print(f"using device: {device}")
-        super().__init__({}, device=device, cfg=cfg)
 
         # TRY NOT TO MODIFY: seeding
         random.seed(args.seed)
@@ -116,14 +142,26 @@ class PPO(skrl.agents.torch.Agent):
         torch.backends.cudnn.deterministic = args.torch_deterministic
         
         self.agent = Agent(env).to(device)
+        # skrl base agent expects wrapped models to expose a `.device` attribute
+        self.agent.device = device
+        models={"agent": self.agent}
         self.optimizer = optim.Adam(self.agent.parameters(), lr=args.learning_rate, eps=1e-5)
+        super().__init__(models=models, device=device, cfg=cfg)
 
-        # ALGO Logic: Storage setup
-        self.obs = torch.zeros((args.num_steps, env.num_envs) + env.observation_space.shape).to(device)
+        # ALGO Logic: Storage setup (flattened Dict obs in skrl key order: privileged_state, state)
+        ss = env.observation_space
+        if isinstance(ss, gym.spaces.Dict):
+            flat_obs_dim = int(np.prod(ss["privileged_state"].shape)) + int(np.prod(ss["state"].shape))
+        else:
+            flat_obs_dim = int(np.prod(ss.shape))
+        self._flat_obs_dim = flat_obs_dim
+        self.obs = torch.zeros((args.num_steps, env.num_envs, flat_obs_dim)).to(device)
         self.actions = torch.zeros((args.num_steps, env.num_envs) + env.action_space.shape).to(device)
         self.logprobs = torch.zeros((args.num_steps, env.num_envs)).to(device)
         self.rewards = torch.zeros((args.num_steps, env.num_envs)).to(device)
         self.next_dones = torch.zeros((args.num_steps, env.num_envs)).to(device) # shift by one step back wrt original implementation
+        # True failure only; truncation still bootstraps V in GAE.
+        self.next_terminated = torch.zeros((args.num_steps, env.num_envs)).to(device)
         self.values = torch.zeros((args.num_steps, env.num_envs)).to(device)
 
         self.global_step = 0
@@ -156,7 +194,8 @@ class PPO(skrl.agents.torch.Agent):
         )
         done = torch.logical_or(terminated, truncated).flatten()
         self.obs[self.step] = states
-        self.next_dones[self.step] = done 
+        self.next_dones[self.step] = done
+        self.next_terminated[self.step] = terminated.flatten().float()
         self.rewards[self.step] = rewards.flatten()
         self.next_obs = next_states
 
@@ -186,17 +225,17 @@ class PPO(skrl.agents.torch.Agent):
                 lastgaelam = 0
                 for t in reversed(range(self.args.num_steps)):
                     if t == self.args.num_steps - 1:
-                        nextnonterminal = 1.0 - self.next_dones[t]
+                        nextnonterminal = 1.0 - self.next_terminated[t]
                         nextvalues = next_value
                     else:
-                        nextnonterminal = 1.0 - self.next_dones[t]
+                        nextnonterminal = 1.0 - self.next_terminated[t]
                         nextvalues = self.values[t + 1]
                     delta = self.rewards[t] + self.args.gamma * nextvalues * nextnonterminal - self.values[t]
                     advantages[t] = lastgaelam = delta + self.args.gamma * self.args.gae_lambda * nextnonterminal * lastgaelam
                 returns = advantages + self.values
 
             # flatten the batch
-            b_obs = self.obs.reshape((-1,) + self.env.observation_space.shape)
+            b_obs = self.obs.reshape(-1, self._flat_obs_dim)
             b_logprobs = self.logprobs.reshape(-1)
             b_actions = self.actions.reshape((-1,) + self.env.action_space.shape)
             b_advantages = advantages.reshape(-1)
