@@ -90,7 +90,7 @@ if __name__ == "__main__":
     if cli_args.eval:
         print(f"Loading checkpoint from: {cli_args.eval}")
         agent.set_running_mode("eval")
-        agent.load(cli_args.eval)
+        cleanrl_ppo.load_checkpoint(agent, cli_args.eval)
         eval_timesteps = 1000
         rewards = torch.zeros(eval_timesteps, env.num_envs)
         obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs

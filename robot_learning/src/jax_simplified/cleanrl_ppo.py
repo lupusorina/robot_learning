@@ -138,6 +138,7 @@ class PPO(skrl.agents.torch.Agent):
         self.minibatch_size = int(self.batch_size // args.num_minibatches)
         device = torch.device("cuda" if torch.cuda.is_available() and args.cuda else "cpu")
         print(f"using device: {device}")
+        super().__init__({}, device=device, cfg=cfg)
 
         # TRY NOT TO MODIFY: seeding
         random.seed(args.seed)
@@ -148,9 +149,11 @@ class PPO(skrl.agents.torch.Agent):
         self.agent = Agent(env).to(device)
         # skrl base agent expects wrapped models to expose a `.device` attribute
         self.agent.device = device
-        models={"agent": self.agent}
         self.optimizer = optim.Adam(self.agent.parameters(), lr=args.learning_rate, eps=1e-5)
-        super().__init__(models=models, device=device, cfg=cfg)
+
+        # skrl checkpoints are built from `checkpoint_modules`; without this, `agent_*.pt` is `{}`.
+        self.checkpoint_modules["model"] = self.agent
+        self.checkpoint_modules["optimizer"] = self.optimizer
 
         # ALGO Logic: Storage setup (flattened Dict obs in skrl key order: privileged_state, state)
         ss = env.observation_space
@@ -317,3 +320,8 @@ class PPO(skrl.agents.torch.Agent):
 
         # write tracking data and checkpoints
         super().post_interaction(timestep, timesteps)
+
+
+def load_checkpoint(agent: PPO, path: str) -> None:
+    """Load weights from an skrl-format dict checkpoint (keys match ``checkpoint_modules``)."""
+    agent.load(path)
