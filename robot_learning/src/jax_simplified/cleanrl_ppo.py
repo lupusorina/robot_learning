@@ -28,7 +28,7 @@ class Args:
     # Algorithm specific arguments
     learning_rate: float = 3e-4
     """the learning rate of the optimizer"""
-    num_steps: int = 1024
+    num_steps: int = 64
     """the number of steps to run in each environment per policy rollout"""
     anneal_lr: bool = False
     """Toggle learning rate annealing for policy and value networks"""

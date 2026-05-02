@@ -33,7 +33,6 @@ cfg = PPO_DEFAULT_CONFIG.copy()
 cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs"
-cfg["rollouts"] = 64  # memory_size
 
 VIDEO_INTERVAL_ITERS = 50
 VIDEO_DURATION_ITERS = 4
@@ -85,7 +84,7 @@ if __name__ == "__main__":
 
     ppo_args = cleanrl_ppo.Args()
     ppo_args.seed = seed
-    ppo_args.num_steps = cfg["rollouts"]
+    rollout_steps = ppo_args.num_steps
     agent = cleanrl_ppo.PPO(env, ppo_args, cfg)
 
     if cli_args.eval:
@@ -116,7 +115,7 @@ if __name__ == "__main__":
 
         agent.init(trainer_cfg=cfg_trainer)
         nb_timesteps = cfg_trainer["timesteps"]
-        nb_iterations = nb_timesteps // cfg["rollouts"]
+        nb_iterations = nb_timesteps // rollout_steps
         agent.set_running_mode("train")
         timestep = 0
         average_reward_list = []
@@ -129,7 +128,7 @@ if __name__ == "__main__":
             config={
                 "seed": seed,
                 "env_name": env_name,
-                "rollouts": int(cfg["rollouts"]),
+                "rollout_steps": int(rollout_steps),
             },
             video_enabled=bool(cli_args.video),
             video_interval_iters=VIDEO_INTERVAL_ITERS,
@@ -144,9 +143,9 @@ if __name__ == "__main__":
 
         for iteration in range(1, nb_iterations + 1):
             training_logger.start_iteration(iteration, nb_iterations)
-            rollout_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
-            rollout_benchmark_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
-            for i in range(cfg["rollouts"]):
+            rollout_rewards = torch.zeros((rollout_steps, env.num_envs))
+            rollout_benchmark_rewards = torch.zeros((rollout_steps, env.num_envs))
+            for i in range(rollout_steps):
                 agent.pre_interaction(timestep=timestep, timesteps=nb_timesteps)
                 with torch.no_grad():
                     actions = agent.act(obs, timestep=timestep, timesteps=nb_timesteps)[0]
