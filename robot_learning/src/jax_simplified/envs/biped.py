@@ -89,8 +89,16 @@ class BipedSim:
 
         # Initialize the model.
         self._mjx_model = mujoco.mjx.put_model(self._model)
+        self._dof_armature_tree_key = self._find_dof_armature_tree_key()
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
+        if robot_config.RANDOMIZE_ARMATURE:
+            print(
+                "Domain randomization: actuator armature enabled; "
+                f"nominal={robot_config.ARMATURE_NOMINAL}, "
+                f"range=U({robot_config.ARMATURE_MIN}, {robot_config.ARMATURE_MAX}), "
+                "sampled per environment and per non-root joint."
+            )
 
         # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
@@ -104,9 +112,9 @@ class BipedSim:
             "orientation": -1.0,
             "base_height": 0.0,
             "torques": -2.5e-4,
-            "action_rate": -2e-4,
+            "action_rate": -1e-3,
             "feet_air_time": 2.0,
-            "feet_slip": -0.25,
+            "feet_slip": -1.0,
             "feet_height": 0.0,
             "feet_phase": 1.0,
             "termination": -1.0,
@@ -204,11 +212,32 @@ class BipedSim:
         dist = data.contact.dist[idx] * mask[idx]
         return dist < 0
 
+    def _find_dof_armature_tree_key(self) -> str:
+        """Find the pytree path used by replace_pytree for mjx.Model.dof_armature."""
+        model = self.BipedModel(mjmodel=self._mjx_model)
+        for path, leaf in jax.tree_util.tree_leaves_with_path(model):
+            key = jax.tree_util.keystr(path)
+            if (
+                key.endswith("dof_armature")
+                and hasattr(leaf, "shape")
+                and leaf.shape == self._mjx_model.dof_armature.shape
+            ):
+                return key
+        raise RuntimeError("Could not find dof_armature in the MJX model pytree")
+
     def get_randomized_model_params(self, rng: jax.Array) -> dict[str, jax.Array]:
         ''' Get the randomized model parameters. '''
-        del rng
-        # TODO: Implement randomized model parameters.
-        return {}
+        if not robot_config.RANDOMIZE_ARMATURE:
+            return {}
+        dof_armature = self._mjx_model.dof_armature
+        randomized_armature = jax.random.uniform(
+            rng,
+            shape=(self._model.nv - 6,),
+            minval=robot_config.ARMATURE_MIN,
+            maxval=robot_config.ARMATURE_MAX,
+        )
+        dof_armature = dof_armature.at[6:].set(randomized_armature)
+        return {self._dof_armature_tree_key: dof_armature}
 
     def make_model(self, randomized_params: dict[str, jax.Array] = {}) -> BipedModel:
         ''' Make the model. '''
