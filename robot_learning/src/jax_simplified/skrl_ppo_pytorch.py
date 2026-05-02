@@ -30,32 +30,10 @@ def observation_to_agent_tensor(obs, observation_space, device):
     return flatten_tensorized_space(tensorize_space(observation_space, obs, device=device))
 
 cfg = PPO_DEFAULT_CONFIG.copy()
-cfg["mixed_precision"] = True
-cfg["rollouts"] = 1024  # memory_size
-cfg["learning_epochs"] = 10
-cfg["mini_batches"] = 32
-cfg["discount_factor"] = 0.99
-cfg["time_limit_bootstrap"] = True
-cfg["lambda"] = 0.95
-cfg["learning_rate"] = 3e-4
-# cfg["learning_rate_scheduler"] = KLAdaptiveRL
-# cfg["learning_rate_scheduler_kwargs"] = {"kl_threshold": 0.008}
-cfg["grad_norm_clip"] = 0.5
-cfg["ratio_clip"] = 0.2
-cfg["value_clip"] = 0.2
-cfg["clip_predicted_values"] = True
-cfg["entropy_loss_scale"] = 0.0
-cfg["value_loss_scale"] = 0.5
-cfg["kl_threshold"] = 0
-cfg["mixed_precision"] = False
-# cfg["state_preprocessor"] = RunningStandardScaler
-# cfg["state_preprocessor_kwargs"] = {"size": env.observation_space, "device": device}
-# cfg["value_preprocessor"] = RunningStandardScaler
-# cfg["value_preprocessor_kwargs"] = {"size": 1, "device": device}
-# logging to TensorBoard and write checkpoints (in timesteps)
 cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
-cfg["experiment"]["directory"] = "runs/biped"
+cfg["experiment"]["directory"] = "runs"
+cfg["rollouts"] = 1024  # memory_size
 
 VIDEO_INTERVAL_ITERS = 25
 VIDEO_DURATION_ITERS = 1
