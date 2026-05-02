@@ -56,7 +56,8 @@ cd robot_learning/src/jax_simplified
 python skrl_ppo_pytorch.py \
   --train biped \
   --wandb \
-  --video
+  --video \
+  --run-name run_name
 ```
 
 

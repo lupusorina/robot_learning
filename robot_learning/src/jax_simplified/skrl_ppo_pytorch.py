@@ -49,7 +49,7 @@ cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs/biped"
 
-VIDEO_INTERVAL_ITERS = 50
+VIDEO_INTERVAL_ITERS = 25
 VIDEO_DURATION_ITERS = 1
 VIDEO_FPS = 25
 VIDEO_FRAME_STRIDE = 4
@@ -97,10 +97,14 @@ if __name__ == "__main__":
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
     parser.add_argument("--video", action="store_true", help="Record training videos periodically")
+    parser.add_argument("--run-name", type=str, default="", help="Optional name appended to the timestamp")
     cli_args = parser.parse_args()
     seed = cli_args.seed
     if cli_args.train:
-        experiment_name = datetime.datetime.now().strftime("%y-%m-%d_%H-%M-%S-%f") + f"_seed{seed}" + "_" + cli_args.train.replace(" ", "_")
+        experiment_name = datetime.datetime.now().strftime("%y-%m-%d_%H-%M-%S")
+        run_name = cli_args.run_name.strip().replace(" ", "_")
+        if run_name:
+            experiment_name = f"{experiment_name}_{run_name}"
     else:
         experiment_name = "eval"
 
