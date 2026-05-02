@@ -170,8 +170,6 @@ if __name__ == "__main__":
             average_reward = rollout_rewards.mean()
             average_reward_list.append(average_reward)
             # Save to csv file.
-            pd.DataFrame(average_reward_list,
-                         columns=["average_reward"]).to_csv(average_reward_csv, index=False)
             agent.track_data(f"Reward / Average reward", average_reward)
             agent.track_data(f"Reward / Average benchmark reward", rollout_benchmark_rewards.mean())
             training_logger.end_iteration(
