@@ -1,20 +1,27 @@
+import os
+import tqdm
+import torch
+import datetime
+import argparse
+import subprocess
+import numpy as np
 import gymnasium as gym
 import os
 import subprocess
 
-import torch
-import torch.nn as nn
-import numpy as np
-
+import cleanrl_ppo
+from skrl.utils import set_seed
 from skrl.agents.torch.ppo import PPO_DEFAULT_CONFIG
 from skrl.envs.wrappers.torch import wrap_env
-from skrl.utils import set_seed
 from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space
 import cleanrl_ppo
 from utils import tile_images, save_video
 import pandas as pd
 from logging import TrainingLogger
 
+# Custom imports.
+from robot_learning.src.jax_simplified.utils import tile_images, save_video, SaveVideoWrapper
+from robot_learning.src.jax_simplified.utils import save_git_info
 
 def observation_to_agent_tensor(obs, observation_space, device):
     """Map reset/step observations to a flat batch tensor (Dict obs: sorted keys, same as skrl / cleanrl_pPO)."""
@@ -23,6 +30,7 @@ def observation_to_agent_tensor(obs, observation_space, device):
     return flatten_tensorized_space(tensorize_space(observation_space, obs, device=device))
 
 cfg = PPO_DEFAULT_CONFIG.copy()
+cfg["mixed_precision"] = True
 cfg["rollouts"] = 1024  # memory_size
 cfg["learning_epochs"] = 10
 cfg["mini_batches"] = 32
@@ -54,38 +62,6 @@ VIDEO_DURATION_ITERS = 1
 VIDEO_FPS = 25
 VIDEO_FRAME_STRIDE = 4
 
-
-def _try_run_git_command(args, cwd):
-    try:
-        result = subprocess.run(
-            args,
-            cwd=cwd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            check=True
-        )
-        return result.stdout.strip()
-    except Exception as e:
-        return f"Error: {e}"
-
-def save_git_info(output_dir, cwd):
-    os.makedirs(output_dir, exist_ok=True)
-    # Save git hash
-    git_hash = _try_run_git_command(['git', 'rev-parse', 'HEAD'], cwd)
-    with open(os.path.join(output_dir, "git_hash.txt"), "w") as f:
-        f.write(git_hash + "\n")
-    # Save branch name
-    git_branch = _try_run_git_command(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd)
-    with open(os.path.join(output_dir, "git_branch.txt"), "w") as f:
-        f.write(git_branch + "\n")
-    # Save diffs
-    git_diff = _try_run_git_command(['git', 'diff'], cwd)
-    with open(os.path.join(output_dir, "git_diff.patch"), "w") as f:
-        f.write(git_diff)
-
-
-
 if __name__ == "__main__":
     import sys
     import datetime
@@ -107,6 +83,7 @@ if __name__ == "__main__":
             experiment_name = f"{experiment_name}_{run_name}"
     else:
         experiment_name = "eval"
+    cfg["experiment"]["experiment_name"] = experiment_name
 
     # set status bar title
     print(f"\033]2;{experiment_name}\033\\", end="", flush=True)
@@ -155,14 +132,8 @@ if __name__ == "__main__":
         save_git_info(agent.experiment_dir, os.path.dirname(os.path.abspath(__file__)))
 
         total_timesteps = 1_000_000_000
-        # configure and instantiate the RL trainer
+        # Configure and instantiate the RL trainer.
         cfg_trainer = {"timesteps": total_timesteps//env.num_envs, "headless": True}
-        # trainer = SequentialTrainer(cfg=cfg_trainer, env=env, agents=[agent])
-        # print(trainer.num_simultaneous_agents)
-        # print(trainer.agents)
-        # print(trainer.agents_scope)
-        # # start training
-        # trainer.train()
 
         agent.init(trainer_cfg=cfg_trainer)
         nb_timesteps = cfg_trainer["timesteps"]
