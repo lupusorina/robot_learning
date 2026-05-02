@@ -145,3 +145,35 @@ def tile_images(images: tuple[np.ndarray]) -> np.ndarray:
         img_rows.append(img_row)
     grid = np.concatenate(img_rows, axis=0)
     return grid
+
+
+## Github.
+import subprocess
+def _try_run_git_command(args, cwd):
+    try:
+        result = subprocess.run(
+            args,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            check=True
+        )
+        return result.stdout.strip()
+    except Exception as e:
+        return f"Error: {e}"
+
+def save_git_info(output_dir, cwd):
+    os.makedirs(output_dir, exist_ok=True)
+    # Save git hash
+    git_hash = _try_run_git_command(['git', 'rev-parse', 'HEAD'], cwd)
+    with open(os.path.join(output_dir, "git_hash.txt"), "w") as f:
+        f.write(git_hash + "\n")
+    # Save branch name
+    git_branch = _try_run_git_command(['git', 'rev-parse', '--abbrev-ref', 'HEAD'], cwd)
+    with open(os.path.join(output_dir, "git_branch.txt"), "w") as f:
+        f.write(git_branch + "\n")
+    # Save diffs
+    git_diff = _try_run_git_command(['git', 'diff'], cwd)
+    with open(os.path.join(output_dir, "git_diff.patch"), "w") as f:
+        f.write(git_diff)
