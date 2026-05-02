@@ -33,10 +33,10 @@ cfg = PPO_DEFAULT_CONFIG.copy()
 cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs"
-cfg["rollouts"] = 1024  # memory_size
+cfg["rollouts"] = 64  # memory_size
 
-VIDEO_INTERVAL_ITERS = 25
-VIDEO_DURATION_ITERS = 1
+VIDEO_INTERVAL_ITERS = 50
+VIDEO_DURATION_ITERS = 4
 VIDEO_FPS = 25
 VIDEO_FRAME_STRIDE = 4
 
@@ -72,7 +72,7 @@ if __name__ == "__main__":
     # env_name = "Pendulum-v1"
     if env_name == "biped":
         import envs.biped as biped
-        env = biped.VectorEnv(biped.BipedSim(), num_envs=2048)
+        env = biped.VectorEnv(biped.BipedSim(), num_envs=8192)
     else:
         env = gym.make_vec(env_name, num_envs=100, vectorization_mode="sync")
     env_not_wrapped = env
@@ -85,6 +85,7 @@ if __name__ == "__main__":
 
     ppo_args = cleanrl_ppo.Args()
     ppo_args.seed = seed
+    ppo_args.num_steps = cfg["rollouts"]
     agent = cleanrl_ppo.PPO(env, ppo_args, cfg)
 
     if cli_args.eval:
@@ -138,11 +139,11 @@ if __name__ == "__main__":
             video_frame_stride=VIDEO_FRAME_STRIDE,
         )
 
+        obs, infos = env_not_wrapped.reset()
+        obs = observation_to_agent_tensor(obs, env.observation_space, device)
+
         for iteration in range(1, nb_iterations + 1):
             training_logger.start_iteration(iteration, nb_iterations)
-            # Reset domain randomization.
-            obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs
-            obs = observation_to_agent_tensor(obs, env.observation_space, device)
             rollout_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
             rollout_benchmark_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
             for i in range(cfg["rollouts"]):
