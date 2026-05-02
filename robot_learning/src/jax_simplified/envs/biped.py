@@ -86,8 +86,10 @@ class BipedSim:
         self._mjx_model = mujoco.mjx.put_model(self._model)
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
+
+        # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
-        self._max_foot_height = 0.15
+        self._max_foot_height = float(robot_config.DESIRED_FOOT_HEIGHT)
         self._soft_joint_pos_limit_factor = 0.95
         self._reward_scales = {
             "tracking_lin_vel": 2.0,
