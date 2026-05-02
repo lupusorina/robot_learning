@@ -10,3 +10,5 @@ tqdm
 torch
 pynput
 skrl==1.4.3
+wandb[media]
+pandas

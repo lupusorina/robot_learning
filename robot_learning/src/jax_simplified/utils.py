@@ -80,7 +80,7 @@ class RingBuffer:
 
 ## Rendering.
 class SaveVideoWrapper(gym.vector.vector_env.VectorWrapper):
-    def __init__(self, env, video_path, nb_envs_to_render=16, nb_steps_per_video=400):
+    def __init__(self, env, video_path, nb_envs_to_render=4, nb_steps_per_video=400):
         super().__init__(env)
         self.video_path = video_path
         self.frames = []

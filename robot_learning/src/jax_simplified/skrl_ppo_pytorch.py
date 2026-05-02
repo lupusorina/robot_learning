@@ -1,4 +1,6 @@
 import gymnasium as gym
+import os
+import subprocess
 
 import torch
 import torch.nn as nn
@@ -9,8 +11,9 @@ from skrl.envs.wrappers.torch import wrap_env
 from skrl.utils import set_seed
 from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space
 import cleanrl_ppo
-from utils import tile_images, save_video, SaveVideoWrapper
+from utils import tile_images, save_video
 import pandas as pd
+from logging import TrainingLogger
 
 
 def observation_to_agent_tensor(obs, observation_space, device):
@@ -46,9 +49,11 @@ cfg["experiment"]["write_interval"] = 100
 cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs/biped"
 
+VIDEO_INTERVAL_ITERS = 25
+VIDEO_DURATION_ITERS = 1
+VIDEO_FPS = 25
+VIDEO_FRAME_STRIDE = 4
 
-import os
-import subprocess
 
 def _try_run_git_command(args, cwd):
     try:
@@ -82,7 +87,6 @@ def save_git_info(output_dir, cwd):
 
 
 if __name__ == "__main__":
-    import tqdm
     import sys
     import datetime
     import argparse
@@ -91,10 +95,16 @@ if __name__ == "__main__":
     parser.add_argument("--train", type=str, help="Name of the experiment")
     parser.add_argument("--eval", type=str, help="checkpoint to evaluate")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--wandb", action="store_true", help="Enable Weights & Biases logging")
+    parser.add_argument("--video", action="store_true", help="Record training videos periodically")
+    parser.add_argument("--run-name", type=str, default="", help="Optional name appended to the timestamp")
     cli_args = parser.parse_args()
     seed = cli_args.seed
     if cli_args.train:
-        experiment_name = datetime.datetime.now().strftime("%y-%m-%d_%H-%M-%S-%f") + f"_seed{seed}" + "_" + cli_args.train.replace(" ", "_")
+        experiment_name = datetime.datetime.now().strftime("%y-%m-%d_%H-%M-%S")
+        run_name = cli_args.run_name.strip().replace(" ", "_")
+        if run_name:
+            experiment_name = f"{experiment_name}_{run_name}"
     else:
         experiment_name = "eval"
 
@@ -108,7 +118,6 @@ if __name__ == "__main__":
     if env_name == "biped":
         import envs.biped as biped
         env = biped.VectorEnv(biped.BipedSim(), num_envs=2048)
-        env = SaveVideoWrapper(env, f"videos/biped_{experiment_name}")
     else:
         env = gym.make_vec(env_name, num_envs=100, vectorization_mode="sync")
     env_not_wrapped = env
@@ -132,7 +141,7 @@ if __name__ == "__main__":
         obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs
         obs = observation_to_agent_tensor(obs, env.observation_space, device)
         frames = []
-        for i in tqdm.trange(eval_timesteps, desc="Evaluating"):
+        for i in range(eval_timesteps):
             with torch.no_grad():
                 actions = agent.act(obs, timestep=i, timesteps=eval_timesteps)[0]
             next_obs, reward, terminated, truncated, infos = env.step(actions)
@@ -161,17 +170,38 @@ if __name__ == "__main__":
         agent.set_running_mode("train")
         timestep = 0
         average_reward_list = []
+        average_reward_csv = f"runs/{experiment_name}/average_reward.csv"
+        os.makedirs(os.path.dirname(average_reward_csv), exist_ok=True)
+
+        training_logger = TrainingLogger(
+            use_wandb=bool(cli_args.wandb),
+            run_name=experiment_name,
+            config={
+                "seed": seed,
+                "env_name": env_name,
+                "rollouts": int(cfg["rollouts"]),
+            },
+            video_enabled=bool(cli_args.video),
+            video_interval_iters=VIDEO_INTERVAL_ITERS,
+            video_duration_iters=VIDEO_DURATION_ITERS,
+            video_dir=os.path.join(agent.experiment_dir, "videos"),
+            video_fps=VIDEO_FPS,
+            video_frame_stride=VIDEO_FRAME_STRIDE,
+        )
+
         for iteration in range(1, nb_iterations + 1):
-            # Reset domain randomization
+            training_logger.start_iteration(iteration, nb_iterations)
+            # Reset domain randomization.
             obs, infos = env_not_wrapped.reset() # reset does nothing for wrapped vectorized envs
             obs = observation_to_agent_tensor(obs, env.observation_space, device)
             rollout_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
             rollout_benchmark_rewards = torch.zeros((cfg["rollouts"], env.num_envs))
-            for i in tqdm.trange(cfg["rollouts"], desc=f"Iteration {iteration}/{nb_iterations}"):
+            for i in range(cfg["rollouts"]):
                 agent.pre_interaction(timestep=timestep, timesteps=nb_timesteps)
                 with torch.no_grad():
                     actions = agent.act(obs, timestep=timestep, timesteps=nb_timesteps)[0]
                     next_obs, rewards, terminated, truncated, infos = env.step(actions)
+                    training_logger.record_step(infos, terminated, truncated, env_not_wrapped)
                     agent.record_transition(
                         states=obs,
                         actions=actions,
@@ -192,10 +222,16 @@ if __name__ == "__main__":
             average_reward_list.append(average_reward)
             # Save to csv file.
             pd.DataFrame(average_reward_list,
-                         columns=["average_reward"]).to_csv(f"runs/{experiment_name}/average_reward.csv", index=False)
-            print(f"Average reward: {average_reward}")
+                         columns=["average_reward"]).to_csv(average_reward_csv, index=False)
             agent.track_data(f"Reward / Average reward", average_reward)
             agent.track_data(f"Reward / Average benchmark reward", rollout_benchmark_rewards.mean())
+            training_logger.end_iteration(
+                iteration=iteration,
+                nb_iterations=nb_iterations,
+                timestep=timestep,
+                num_envs=env.num_envs,
+                average_reward=average_reward,
+            )
 
         # trainer = StepTrainer(cfg=cfg_trainer, env=env, agents=agent)
         # # Fix agents_scope format for single agent (convert from [1] to [(0, num_envs)])
