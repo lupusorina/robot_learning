@@ -1,6 +1,7 @@
 # cleanrl ppo implementation adapted to an skrl agent api
 
 # docs and experiment results can be found at https://docs.cleanrl.dev/rl-algorithms/ppo/#ppo_continuous_actionpy
+import math
 import random
 from dataclasses import dataclass
 
@@ -54,8 +55,11 @@ class Args:
     target_kl: float = None
     """the target KL divergence threshold"""
 
-def layer_init(layer, std=np.sqrt(2), bias_const=0.0):
-    torch.nn.init.orthogonal_(layer.weight, std)
+def layer_init(layer, bias_const=0.0):
+    """LeCun normal: Var(W) = 1/fan_in (fan-in is in_features for Linear)."""
+    fan_in = layer.weight.shape[1]
+    std = math.sqrt(1.0 / fan_in)
+    torch.nn.init.normal_(layer.weight, mean=0.0, std=std)
     torch.nn.init.constant_(layer.bias, bias_const)
     return layer
 
@@ -84,7 +88,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(256, 128)),
             nn.LayerNorm(128),
             nn.SiLU(),
-            layer_init(nn.Linear(128, 1), std=1.0),
+            layer_init(nn.Linear(128, 1)),
         )
         self.actor_mean = nn.Sequential(
             layer_init(nn.Linear(self._policy_dim, 512)),
@@ -96,7 +100,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(256, 128)),
             nn.LayerNorm(128),
             nn.SiLU(),
-            layer_init(nn.Linear(128, act_dim), std=0.01),
+            layer_init(nn.Linear(128, act_dim)),
         )
         self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
 
@@ -159,7 +163,6 @@ class PPO(skrl.agents.torch.Agent):
         self.actions = torch.zeros((args.num_steps, env.num_envs) + env.action_space.shape).to(device)
         self.logprobs = torch.zeros((args.num_steps, env.num_envs)).to(device)
         self.rewards = torch.zeros((args.num_steps, env.num_envs)).to(device)
-        self.next_dones = torch.zeros((args.num_steps, env.num_envs)).to(device) # shift by one step back wrt original implementation
         # True failure only; truncation still bootstraps V in GAE.
         self.next_terminated = torch.zeros((args.num_steps, env.num_envs)).to(device)
         self.values = torch.zeros((args.num_steps, env.num_envs)).to(device)
@@ -192,9 +195,7 @@ class PPO(skrl.agents.torch.Agent):
         super().record_transition(
             states, actions, rewards, next_states, terminated, truncated, infos, timestep, timesteps
         )
-        done = torch.logical_or(terminated, truncated).flatten()
         self.obs[self.step] = states
-        self.next_dones[self.step] = done
         self.next_terminated[self.step] = terminated.flatten().float()
         self.rewards[self.step] = rewards.flatten()
         self.next_obs = next_states
