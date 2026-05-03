@@ -1,15 +1,5 @@
-import importlib.util
 import os
-import sysconfig
 import time
-
-_stdlib_logging_path = os.path.join(sysconfig.get_path("stdlib"), "logging", "__init__.py")
-_stdlib_logging_spec = importlib.util.spec_from_file_location("_stdlib_logging", _stdlib_logging_path)
-_stdlib_logging = importlib.util.module_from_spec(_stdlib_logging_spec)
-_stdlib_logging_spec.loader.exec_module(_stdlib_logging)
-for _name in dir(_stdlib_logging):
-    if _name not in globals():
-        globals()[_name] = getattr(_stdlib_logging, _name)
 
 import numpy as np
 import wandb

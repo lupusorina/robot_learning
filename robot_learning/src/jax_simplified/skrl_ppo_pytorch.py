@@ -17,7 +17,7 @@ from skrl.utils.spaces.torch import flatten_tensorized_space, tensorize_space
 import cleanrl_ppo
 from utils import tile_images, save_video
 import pandas as pd
-from logging import TrainingLogger
+from training_logger import TrainingLogger
 
 # Custom imports.
 from robot_learning.src.jax_simplified.utils import tile_images, save_video, SaveVideoWrapper
