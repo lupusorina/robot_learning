@@ -1,6 +1,16 @@
 #!/bin/bash
 
-# Match ``robot_learning/src/jax/train.py`` Brax batching (batch_size=256, num_minibatches=32).
-# SKRL ``rollouts`` = unroll_length * (256*32 // num_envs); with 8192 envs and unroll 20 -> rollouts 20.
+if [ "$1" == "learn_ppo_policy" ]; then
+    CUDA_VISIBLE_DEVICES=1; export MUJOCO_GL=egl; python skrl_ppo_pytorch.py  --train biped
+fi
 
-export MUJOCO_GL=egl; python skrl_ppo_pytorch.py  --train biped
+
+if [ "$1" == "learn_online" ]; then
+    export MUJOCO_GL=egl; CUDA_VISIBLE_DEVICES=1  python3 online_learning/cleanrl_sac.py \
+        --render_mode rgb_array \
+        --env_id Biped \
+        --runs_directory runs_biped \
+        --exp_name trial_1 \
+        --num_envs 1 \
+	--capture_video
+fi
