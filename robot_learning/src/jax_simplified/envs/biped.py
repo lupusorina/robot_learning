@@ -119,8 +119,8 @@ class BipedSim:
             "feet_height": 0.0,
             "feet_phase": 0.5,
             "termination": -1.0,
-            "joint_deviation_knee": -0.1,
-            "joint_deviation_hip": -0.25,
+            "joint_deviation_knee": -0.0,
+            "joint_deviation_hip": -0.0,
             "dof_pos_limits": -1.0,
             "pose": -1.0,
         }
