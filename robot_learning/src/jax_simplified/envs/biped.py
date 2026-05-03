@@ -295,7 +295,9 @@ class BipedSim:
         command = self._sample_command(key)
 
         # Initialize the phase.
-        phase = jnp.array([0.0, jnp.pi])
+        rng, key = jax.random.split(rng)
+        base_phase = jax.random.uniform(key, (), minval=-jnp.pi, maxval=jnp.pi)
+        phase = jnp.fmod(jnp.array([base_phase, base_phase + jnp.pi]) + jnp.pi, 2 * jnp.pi) - jnp.pi
         phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
 
         # Initialize the observation.
@@ -520,7 +522,7 @@ class BipedSim:
 
         foot_pos = data.site_xpos[self._feet_site_id]
         foot_z = foot_pos[..., -1]
-        rz = utils.get_rz(state.phase, swing_height=self._max_foot_height)
+        rz = utils.get_foot_pos_z(state.phase, swing_height=self._max_foot_height)
         feet_phase = jnp.sum(jnp.exp(-jnp.square((foot_z - rz) / self._feet_phase_std)))
 
         joint_deviation_hip = jnp.sum(
