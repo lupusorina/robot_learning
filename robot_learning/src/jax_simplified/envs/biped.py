@@ -117,7 +117,7 @@ class BipedSim:
             "feet_air_time": 2.0,
             "feet_slip": -1.0,
             "feet_height": 0.0,
-            "feet_phase": 1.0,
+            "feet_phase": 0.5,
             "termination": -1.0,
             "joint_deviation_knee": -0.1,
             "joint_deviation_hip": -0.25,
@@ -130,6 +130,10 @@ class BipedSim:
         r = self._q_j_max - self._q_j_min
         self._soft_q_j_min = c - 0.5 * r * self._soft_joint_pos_limit_factor
         self._soft_q_j_max = c + 0.5 * r * self._soft_joint_pos_limit_factor
+        self._action_target_offsets = jnp.array([
+            robot_config.ACTION_TARGET_OFFSETS[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)]
+            for i in range(self._model.nu)
+        ])
 
         self._feet_site_id = np.array([self._model.site(name).id for name in robot_config.FEET_SITES])
         self._feet_geom_id = np.array([self._model.geom(name).id for name in robot_config.FEET_GEOMS])
@@ -393,7 +397,7 @@ class BipedSim:
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
         ''' Step the model. '''
 
-        # Create the actions. Non-actuated joints are set to zero.
+        # Create normalized actions in MuJoCo actuator order.
         action_complete = jnp.zeros(self._model.nu)
         for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
             if policy_idx is None:
@@ -402,7 +406,13 @@ class BipedSim:
                 self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]
             ].set(action[policy_idx])
 
-        motor_targets = self._default_q_joints + action_complete
+        action_offsets = jnp.where(
+            action_complete >= 0.0,
+            action_complete * self._action_target_offsets[:, 1],
+            -action_complete * self._action_target_offsets[:, 0],
+        )
+        motor_targets = self._default_q_joints + action_offsets
+        motor_targets = jnp.clip(motor_targets, self._q_j_min, self._q_j_max)
 
         data = state.mjdata
 

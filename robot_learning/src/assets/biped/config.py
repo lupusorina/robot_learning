@@ -21,13 +21,26 @@ IMU_SITE = "imu_location"
 DESIRED_HEIGHT = 0.56
 DESIRED_FOOT_HEIGHT = 0.10
 FEET_PHASE_STD = 0.06
-GAIT_PERIOD = 0.35
+GAIT_PERIOD = 0.70
 
 # Domain randomization.
 RANDOMIZE_ARMATURE = True
 ARMATURE_NOMINAL = 0.001
 ARMATURE_MIN = 0.0001
 ARMATURE_MAX = 0.005
+
+# Normalized actions in [-1, 1] map to these joint-position offsets around the
+# XML home pose. Each tuple is (negative_action_offset, positive_action_offset).
+ACTION_TARGET_OFFSETS = {
+    "L_HAA": (-0.20, 0.20),
+    "L_HFE": (-0.70, 0.90),
+    "L_KFE": (-0.90, 1.10),
+    "L_ANKLE": (0.0, 0.0),
+    "R_HAA": (-0.20, 0.20),
+    "R_HFE": (-0.70, 0.90),
+    "R_KFE": (-0.90, 1.10),
+    "R_ANKLE": (0.0, 0.0),
+}
 
 HIP_JOINT_NAMES = ["HAA", "HFE"]
 KNEE_JOINT_NAMES = ["KFE"]
