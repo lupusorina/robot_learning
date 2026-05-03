@@ -28,6 +28,14 @@ def get_rz(
   return jnp.where(x <= 0.5, stance, swing)
 
 
+def get_foot_pos_z(
+    phase: Union[jax.Array, float],
+    swing_height: Union[jax.Array, float] = 0.10,
+) -> jax.Array:
+    swing_z = swing_height * jnp.sin(phase)
+    return jnp.where(phase > 0.0, swing_z, 0.0)
+
+
 def get_collision_info(
     contact: Any, geom1: int, geom2: int
 ) -> Tuple[jax.Array, jax.Array]:

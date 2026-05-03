@@ -35,7 +35,7 @@ cfg["experiment"]["checkpoint_interval"] = 5000
 cfg["experiment"]["directory"] = "runs"
 
 VIDEO_INTERVAL_ITERS = 50
-VIDEO_DURATION_ITERS = 4
+VIDEO_DURATION_ITERS = 5
 VIDEO_FPS = 25
 VIDEO_FRAME_STRIDE = 4
 

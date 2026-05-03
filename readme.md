@@ -51,8 +51,13 @@ cd src/jax_simplified
 
 Enable Weights & Biases logging (optional):
 
+(If you want to run on a specific gpu, set CUDA_VISIBLE_DEVICES and MUJOCO_EGL_DEVICE_ID to the desired GPU ID. You can check GPU IDs in the terminal via: ```nvidia-smi```)
+
 ```
 cd robot_learning/src/jax_simplified
+MUJOCO_GL=egl \
+CUDA_VISIBLE_DEVICES=0 \
+MUJOCO_EGL_DEVICE_ID=0 \
 python skrl_ppo_pytorch.py \
   --train biped \
   --wandb \

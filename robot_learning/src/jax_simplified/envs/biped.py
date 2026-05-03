@@ -57,6 +57,7 @@ class BipedSim:
         phase_dt: jax.Array
         feet_air_time: jax.Array
         last_contact: jax.Array
+        contact_schedule_matching_steps: jax.Array
         swing_peak: jax.Array
         step_count: jax.Array
         reward: jax.Array
@@ -89,38 +90,55 @@ class BipedSim:
 
         # Initialize the model.
         self._mjx_model = mujoco.mjx.put_model(self._model)
+        self._dof_armature_tree_key = self._find_dof_armature_tree_key()
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
+        if robot_config.RANDOMIZE_ARMATURE:
+            print(
+                "Domain randomization: actuator armature enabled; "
+                f"nominal={robot_config.ARMATURE_NOMINAL}, "
+                f"range=U({robot_config.ARMATURE_MIN}, {robot_config.ARMATURE_MAX}), "
+                "sampled per environment and per non-root joint."
+            )
 
         # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
         self._max_foot_height = float(robot_config.DESIRED_FOOT_HEIGHT)
+        self._feet_phase_std = float(robot_config.FEET_PHASE_STD)
         self._soft_joint_pos_limit_factor = 0.95
         self._reward_scales = {
             "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 1.0,
-            "lin_vel_z": 0.0,
+            "lin_vel_z": -2.0,
             "ang_vel_xy": -0.15,
             "orientation": -1.0,
             "base_height": 0.0,
             "torques": -2.5e-4,
-            "action_rate": -2e-4,
-            "feet_air_time": 2.0,
-            "feet_slip": -0.25,
+            "action_rate": -1e-3,
+            "feet_air_time": 0.0,
+            "feet_slip": -1.0,
             "feet_height": 0.0,
-            "feet_phase": 1.0,
+            "feet_phase": 0.5,
+            "contact_schedule": 2.0,
             "termination": -1.0,
-            "joint_deviation_knee": -0.1,
-            "joint_deviation_hip": -0.25,
+            "joint_deviation_knee": -0.0,
+            "joint_deviation_hip": -0.0,
             "dof_pos_limits": -1.0,
             "pose": -1.0,
         }
+        self._contact_schedule_r_min = 0.2
+        self._contact_schedule_r_max = 1.0
+        self._contact_schedule_k_max = 10.0
 
         self._q_j_min, self._q_j_max = self._model.jnt_range[1:].T
         c = (self._q_j_min + self._q_j_max) / 2
         r = self._q_j_max - self._q_j_min
         self._soft_q_j_min = c - 0.5 * r * self._soft_joint_pos_limit_factor
         self._soft_q_j_max = c + 0.5 * r * self._soft_joint_pos_limit_factor
+        self._action_target_offsets = jnp.array([
+            robot_config.ACTION_TARGET_OFFSETS[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)]
+            for i in range(self._model.nu)
+        ])
 
         self._feet_site_id = np.array([self._model.site(name).id for name in robot_config.FEET_SITES])
         self._feet_geom_id = np.array([self._model.geom(name).id for name in robot_config.FEET_GEOMS])
@@ -204,11 +222,32 @@ class BipedSim:
         dist = data.contact.dist[idx] * mask[idx]
         return dist < 0
 
+    def _find_dof_armature_tree_key(self) -> str:
+        """Find the pytree path used by replace_pytree for mjx.Model.dof_armature."""
+        model = self.BipedModel(mjmodel=self._mjx_model)
+        for path, leaf in jax.tree_util.tree_leaves_with_path(model):
+            key = jax.tree_util.keystr(path)
+            if (
+                key.endswith("dof_armature")
+                and hasattr(leaf, "shape")
+                and leaf.shape == self._mjx_model.dof_armature.shape
+            ):
+                return key
+        raise RuntimeError("Could not find dof_armature in the MJX model pytree")
+
     def get_randomized_model_params(self, rng: jax.Array) -> dict[str, jax.Array]:
         ''' Get the randomized model parameters. '''
-        del rng
-        # TODO: Implement randomized model parameters.
-        return {}
+        if not robot_config.RANDOMIZE_ARMATURE:
+            return {}
+        dof_armature = self._mjx_model.dof_armature
+        randomized_armature = jax.random.uniform(
+            rng,
+            shape=(self._model.nv - 6,),
+            minval=robot_config.ARMATURE_MIN,
+            maxval=robot_config.ARMATURE_MAX,
+        )
+        dof_armature = dof_armature.at[6:].set(randomized_armature)
+        return {self._dof_armature_tree_key: dof_armature}
 
     def make_model(self, randomized_params: dict[str, jax.Array] = {}) -> BipedModel:
         ''' Make the model. '''
@@ -261,8 +300,10 @@ class BipedSim:
         command = self._sample_command(key)
 
         # Initialize the phase.
-        phase = jnp.array([0.0, jnp.pi])
-        phase_dt = 2 * jnp.pi * self.ctrl_dt * jax.random.uniform(key, (1,), minval=1.25, maxval=1.5)
+        rng, key = jax.random.split(rng)
+        base_phase = jax.random.uniform(key, (), minval=-jnp.pi, maxval=jnp.pi)
+        phase = jnp.fmod(jnp.array([base_phase, base_phase + jnp.pi]) + jnp.pi, 2 * jnp.pi) - jnp.pi
+        phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
 
         # Initialize the observation.
         current_obs = self._compute_current_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase)
@@ -292,6 +333,7 @@ class BipedSim:
             phase_dt=phase_dt,
             feet_air_time=jnp.zeros(2),
             last_contact=jnp.zeros(2, dtype=bool),
+            contact_schedule_matching_steps=jnp.zeros(()),
             swing_peak=jnp.zeros(2),
             step_count=jnp.array(0, dtype=jnp.int32),
             reward=jnp.array(0.0),
@@ -363,7 +405,7 @@ class BipedSim:
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
         ''' Step the model. '''
 
-        # Create the actions. Non-actuated joints are set to zero.
+        # Create normalized actions in MuJoCo actuator order.
         action_complete = jnp.zeros(self._model.nu)
         for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
             if policy_idx is None:
@@ -372,7 +414,13 @@ class BipedSim:
                 self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]
             ].set(action[policy_idx])
 
-        motor_targets = self._default_q_joints + action_complete
+        action_offsets = jnp.where(
+            action_complete >= 0.0,
+            action_complete * self._action_target_offsets[:, 1],
+            -action_complete * self._action_target_offsets[:, 0],
+        )
+        motor_targets = self._default_q_joints + action_offsets
+        motor_targets = jnp.clip(motor_targets, self._q_j_min, self._q_j_max)
 
         data = state.mjdata
 
@@ -387,6 +435,12 @@ class BipedSim:
         # Check if the feet are in contact with the ground.
         contact = jnp.array([self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id])
         contact_filt = contact | state.last_contact # prevents flickering contact signals.
+        contact_schedule_match = self._contact_schedule_match(contact, state.phase)
+        contact_schedule_matching_steps = jnp.where(
+            contact_schedule_match,
+            state.contact_schedule_matching_steps + 1.0,
+            0.0,
+        )
 
         # Gait bookkeeping.
         first_contact = (state.feet_air_time > 0.0) * contact_filt
@@ -402,6 +456,9 @@ class BipedSim:
         new_step_count = state.step_count + 1
         truncated = new_step_count >= self.max_episode_steps
         step_count = jnp.where(terminated | truncated, 0, new_step_count)
+        contact_schedule_matching_steps = jnp.where(
+            terminated | truncated, 0.0, contact_schedule_matching_steps
+        )
 
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
         feet_air_time = feet_air_time * (~contact)
@@ -420,6 +477,7 @@ class BipedSim:
             phase=phase,
             feet_air_time=feet_air_time,
             last_contact=contact,
+            contact_schedule_matching_steps=contact_schedule_matching_steps,
             swing_peak=swing_peak,
             step_count=step_count,
             reward=reward,
@@ -480,9 +538,9 @@ class BipedSim:
 
         foot_pos = data.site_xpos[self._feet_site_id]
         foot_z = foot_pos[..., -1]
-        rz = utils.get_rz(state.phase, swing_height=self._max_foot_height)
-        error = jnp.sum(jnp.square(foot_z - rz))
-        feet_phase = jnp.exp(-error / 0.01)
+        rz = utils.get_foot_pos_z(state.phase, swing_height=self._max_foot_height)
+        feet_phase = jnp.sum(jnp.exp(-jnp.square((foot_z - rz) / self._feet_phase_std)))
+        contact_schedule = self._reward_contact_schedule(contact, state.phase, state.contact_schedule_matching_steps)
 
         joint_deviation_hip = jnp.sum(
             jnp.abs(data.qpos[7:][self._hip_indices] - self._default_q_joints[self._hip_indices])
@@ -510,6 +568,7 @@ class BipedSim:
             "feet_slip": feet_slip,
             "feet_height": feet_height,
             "feet_phase": feet_phase,
+            "contact_schedule": contact_schedule,
             "termination": terminated,
             "joint_deviation_knee": joint_deviation_knee,
             "joint_deviation_hip": joint_deviation_hip,
@@ -519,6 +578,18 @@ class BipedSim:
         reward_terms = {k: self._reward_scales[k] * v for k, v in reward_terms.items()}
         total = sum(reward_terms.values())
         return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0), reward_terms
+
+    def _contact_schedule_match(self, contact: jax.Array, phase: jax.Array) -> jax.Array:
+        target_contact = phase < 0.0
+        return jnp.all(contact == target_contact)
+
+    def _reward_contact_schedule(
+        self, contact: jax.Array, phase: jax.Array, matching_steps: jax.Array
+    ) -> jax.Array:
+        matches = self._contact_schedule_match(contact, phase)
+        alpha = jnp.clip(matching_steps / self._contact_schedule_k_max, 0.0, 1.0)
+        reward = self._contact_schedule_r_min * (1.0 - alpha) + self._contact_schedule_r_max * alpha
+        return jnp.where(matches, reward, 0.0)
 
     def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[dict, dict]:
         del rng
