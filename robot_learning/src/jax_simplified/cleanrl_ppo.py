@@ -128,6 +128,14 @@ class Agent(nn.Module):
             action = probs.sample()
         return action, probs.log_prob(action).sum(1), probs.entropy().sum(1), self.critic(value_x)
 
+    def get_action(self, x):
+        action_mean = self.actor_mean(x)
+        action_logstd = self.actor_logstd.expand_as(action_mean)
+        action_std = torch.exp(action_logstd)
+        probs = Normal(action_mean, action_std)
+        action = probs.sample()
+        return action
+
 
 class PPO(skrl.agents.torch.Agent):
     def __init__(self, env, args, cfg):
