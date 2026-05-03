@@ -57,6 +57,7 @@ class BipedSim:
         phase_dt: jax.Array
         feet_air_time: jax.Array
         last_contact: jax.Array
+        contact_schedule_matching_steps: jax.Array
         swing_peak: jax.Array
         step_count: jax.Array
         reward: jax.Array
@@ -114,16 +115,20 @@ class BipedSim:
             "base_height": 0.0,
             "torques": -2.5e-4,
             "action_rate": -1e-3,
-            "feet_air_time": 2.0,
+            "feet_air_time": 0.0,
             "feet_slip": -1.0,
             "feet_height": 0.0,
             "feet_phase": 0.5,
+            "contact_schedule": 2.0,
             "termination": -1.0,
             "joint_deviation_knee": -0.0,
             "joint_deviation_hip": -0.0,
             "dof_pos_limits": -1.0,
             "pose": -1.0,
         }
+        self._contact_schedule_r_min = 0.2
+        self._contact_schedule_r_max = 1.0
+        self._contact_schedule_k_max = 10.0
 
         self._q_j_min, self._q_j_max = self._model.jnt_range[1:].T
         c = (self._q_j_min + self._q_j_max) / 2
@@ -328,6 +333,7 @@ class BipedSim:
             phase_dt=phase_dt,
             feet_air_time=jnp.zeros(2),
             last_contact=jnp.zeros(2, dtype=bool),
+            contact_schedule_matching_steps=jnp.zeros(()),
             swing_peak=jnp.zeros(2),
             step_count=jnp.array(0, dtype=jnp.int32),
             reward=jnp.array(0.0),
@@ -429,6 +435,12 @@ class BipedSim:
         # Check if the feet are in contact with the ground.
         contact = jnp.array([self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id])
         contact_filt = contact | state.last_contact # prevents flickering contact signals.
+        contact_schedule_match = self._contact_schedule_match(contact, state.phase)
+        contact_schedule_matching_steps = jnp.where(
+            contact_schedule_match,
+            state.contact_schedule_matching_steps + 1.0,
+            0.0,
+        )
 
         # Gait bookkeeping.
         first_contact = (state.feet_air_time > 0.0) * contact_filt
@@ -444,6 +456,9 @@ class BipedSim:
         new_step_count = state.step_count + 1
         truncated = new_step_count >= self.max_episode_steps
         step_count = jnp.where(terminated | truncated, 0, new_step_count)
+        contact_schedule_matching_steps = jnp.where(
+            terminated | truncated, 0.0, contact_schedule_matching_steps
+        )
 
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
         feet_air_time = feet_air_time * (~contact)
@@ -462,6 +477,7 @@ class BipedSim:
             phase=phase,
             feet_air_time=feet_air_time,
             last_contact=contact,
+            contact_schedule_matching_steps=contact_schedule_matching_steps,
             swing_peak=swing_peak,
             step_count=step_count,
             reward=reward,
@@ -524,6 +540,7 @@ class BipedSim:
         foot_z = foot_pos[..., -1]
         rz = utils.get_foot_pos_z(state.phase, swing_height=self._max_foot_height)
         feet_phase = jnp.sum(jnp.exp(-jnp.square((foot_z - rz) / self._feet_phase_std)))
+        contact_schedule = self._reward_contact_schedule(contact, state.phase, state.contact_schedule_matching_steps)
 
         joint_deviation_hip = jnp.sum(
             jnp.abs(data.qpos[7:][self._hip_indices] - self._default_q_joints[self._hip_indices])
@@ -551,6 +568,7 @@ class BipedSim:
             "feet_slip": feet_slip,
             "feet_height": feet_height,
             "feet_phase": feet_phase,
+            "contact_schedule": contact_schedule,
             "termination": terminated,
             "joint_deviation_knee": joint_deviation_knee,
             "joint_deviation_hip": joint_deviation_hip,
@@ -560,6 +578,18 @@ class BipedSim:
         reward_terms = {k: self._reward_scales[k] * v for k, v in reward_terms.items()}
         total = sum(reward_terms.values())
         return jnp.clip(total * self.ctrl_dt, 0.0, 10000.0), reward_terms
+
+    def _contact_schedule_match(self, contact: jax.Array, phase: jax.Array) -> jax.Array:
+        target_contact = phase < 0.0
+        return jnp.all(contact == target_contact)
+
+    def _reward_contact_schedule(
+        self, contact: jax.Array, phase: jax.Array, matching_steps: jax.Array
+    ) -> jax.Array:
+        matches = self._contact_schedule_match(contact, phase)
+        alpha = jnp.clip(matching_steps / self._contact_schedule_k_max, 0.0, 1.0)
+        reward = self._contact_schedule_r_min * (1.0 - alpha) + self._contact_schedule_r_max * alpha
+        return jnp.where(matches, reward, 0.0)
 
     def build_obs(self, state: BipedState, rng: jax.Array) -> tuple[dict, dict]:
         del rng
