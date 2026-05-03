@@ -103,11 +103,12 @@ class BipedSim:
         # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
         self._max_foot_height = float(robot_config.DESIRED_FOOT_HEIGHT)
+        self._feet_phase_std = float(robot_config.FEET_PHASE_STD)
         self._soft_joint_pos_limit_factor = 0.95
         self._reward_scales = {
             "tracking_lin_vel": 2.0,
             "tracking_ang_vel": 1.0,
-            "lin_vel_z": 0.0,
+            "lin_vel_z": -2.0,
             "ang_vel_xy": -0.15,
             "orientation": -1.0,
             "base_height": 0.0,
@@ -291,7 +292,7 @@ class BipedSim:
 
         # Initialize the phase.
         phase = jnp.array([0.0, jnp.pi])
-        phase_dt = 2 * jnp.pi * self.ctrl_dt * jax.random.uniform(key, (1,), minval=1.25, maxval=1.5)
+        phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
 
         # Initialize the observation.
         current_obs = self._compute_current_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase)
@@ -510,8 +511,7 @@ class BipedSim:
         foot_pos = data.site_xpos[self._feet_site_id]
         foot_z = foot_pos[..., -1]
         rz = utils.get_rz(state.phase, swing_height=self._max_foot_height)
-        error = jnp.sum(jnp.square(foot_z - rz))
-        feet_phase = jnp.exp(-error / 0.01)
+        feet_phase = jnp.sum(jnp.exp(-jnp.square((foot_z - rz) / self._feet_phase_std)))
 
         joint_deviation_hip = jnp.sum(
             jnp.abs(data.qpos[7:][self._hip_indices] - self._default_q_joints[self._hip_indices])
