@@ -555,7 +555,7 @@ class VectorEnv(gym.vector.VectorEnv):
         self.render_mode = "rgb_array"
         self.dt = sim.dt
         self.metadata = {
-            "autoreset_mode": gym.vector.AutoresetMode.NEXT_STEP,
+            "autoreset_mode": gym.vector.AutoresetMode.SAME_STEP,
             "max_episode_steps": sim.max_episode_steps,
         }
         self.single_observation_space = sim.observation_space
@@ -619,8 +619,6 @@ class VectorEnv(gym.vector.VectorEnv):
         self.randomize_model()
         self.rng, key = jax.random.split(self.rng)
         self.states = self._vmapped_reset(self.model, key)
-        self.reset_states = self.states
-        self.reset_next = jnp.zeros(self.num_envs, dtype=jnp.bool_)
         self.rng, key = jax.random.split(self.rng)
         obs, info = self._vmapped_build_obs(self.states, key)
         return self._obs_to_numpy(obs), info
@@ -631,12 +629,21 @@ class VectorEnv(gym.vector.VectorEnv):
         self.renderers = [] # clear renderers
 
     def step(self, actions: jax.Array) -> tuple[dict, jax.Array, jax.Array, jax.Array, dict]:
-        self.states = self._vmapped_step(self.model, self.states, actions)
-        self.states = self._vmapped_autoreset(self.reset_next, self.states, self.reset_states)
+        states = self._vmapped_step(self.model, self.states, actions)
         self.rng, key = jax.random.split(self.rng)
-        obs, info = self._vmapped_build_obs(self.states, key)
+        obs, info = self._vmapped_build_obs(states, key)
         reward, terminated, truncated = self._vmapped_get_reward(info)
-        self.reset_next = terminated | truncated
+        reset_mask = terminated | truncated
+
+        if bool(np.asarray(reset_mask).any()):
+            self.rng, key = jax.random.split(self.rng)
+            reset_states = self._vmapped_reset(self.model, key)
+            states = self._vmapped_autoreset(reset_mask, states, reset_states)
+
+            self.rng, key = jax.random.split(self.rng)
+            obs, _ = self._vmapped_build_obs(states, key)
+
+        self.states = states
         return self._obs_to_numpy(obs), np.array(reward), np.array(terminated), np.array(truncated), info
 
     def render(self, max_render_envs=4):
