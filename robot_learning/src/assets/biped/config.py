@@ -54,3 +54,8 @@ SIDES = ["L", "R"]
                     # R_HAA R_HFE R_KFE R_ANKLE
 COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0,  # left leg.
                       1.0, 0.01, 0.01, 1.0]  # right leg.
+
+
+CTRL_DT = 0.01
+SIM_DT = 0.001
+HISTORY_LEN = 3
