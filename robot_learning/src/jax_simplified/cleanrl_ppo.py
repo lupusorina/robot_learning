@@ -67,16 +67,16 @@ def layer_init(layer, bias_const=0.0):
 class Agent(nn.Module):
     """Actor sees policy ``state``; critic sees ``privileged_state`` (asymmetric PPO) when obs is a Dict."""
 
-    def __init__(self, envs):
+    def __init__(self, env_observation_space: gym.spaces.Space, env_action_space: gym.spaces.Space):
         super().__init__()
-        ss = envs.observation_space
+        ss = env_observation_space
         if isinstance(ss, gym.spaces.Dict):
             self._priv_dim = int(np.prod(ss["privileged_state"].shape))
             self._policy_dim = int(np.prod(ss["state"].shape))
         else:
             self._priv_dim = None
             self._policy_dim = int(np.prod(ss.shape))
-        act_dim = int(np.prod(envs.action_space.shape))
+        act_dim = int(np.prod(env_action_space.shape))
         critic_in = self._priv_dim if self._priv_dim is not None else self._policy_dim
         self.critic = nn.Sequential(
             layer_init(nn.Linear(critic_in, 512)),
@@ -102,7 +102,7 @@ class Agent(nn.Module):
             nn.SiLU(),
             layer_init(nn.Linear(128, act_dim)),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(envs.action_space.shape)))
+        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(env_action_space.shape)))
 
     def _policy_value_obs(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._priv_dim is not None:
@@ -154,7 +154,9 @@ class PPO(skrl.agents.torch.Agent):
         torch.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = args.torch_deterministic
         
-        self.agent = Agent(env).to(device)
+        env_observation_space = env.observation_space
+        env_action_space = env.action_space
+        self.agent = Agent(env_observation_space, env_action_space).to(device)
         # skrl base agent expects wrapped models to expose a `.device` attribute
         self.agent.device = device
         self.optimizer = optim.Adam(self.agent.parameters(), lr=args.learning_rate, eps=1e-5)
