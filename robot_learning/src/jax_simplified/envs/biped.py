@@ -80,11 +80,11 @@ class BipedSim:
         # Initialize the model.
         self._model = mujoco.MjModel.from_xml_path(robot_config.XML_PATH)
         self._model.opt.timestep = 0.001
-        self.ctrl_dt = 0.01
-        self._sim_dt = 0.001
+        self.ctrl_dt = robot_config.CTRL_DT
+        self._sim_dt = robot_config.SIM_DT
         self._n_substeps = int(round(self.ctrl_dt / self._sim_dt))
         self.dt = self.ctrl_dt
-        self.history_len = 3
+        self.history_len = robot_config.HISTORY_LEN
 
         # Control-step limit per episode (truncation).
         self.max_episode_steps = 1000
@@ -210,16 +210,6 @@ class BipedSim:
             }
         )
 
-        self.config_dict = {
-            "ctrl_dt": self.ctrl_dt,
-            "n_substeps": self._n_substeps,
-            "dt": self.dt,
-            "history_len": self.history_len,
-            "action_size": self.action_space.shape[0],
-            "state_size": self.observation_space["state"].shape[0],
-            "privileged_state_size": self.observation_space["privileged_state"].shape[0],
-        }
-
         # Initial configuration.
         dict_initial_qpos = {}
         for i in range(self._model.njnt): # First joint is freejoint.
@@ -233,15 +223,27 @@ class BipedSim:
                 'actuated_joint_names_to_policy_idx_dict': self.actuated_joint_names_to_policy_idx_dict,
                 }, f)
 
-            with open(os.path.join(save_config_folder, 'config.json'), 'w') as f:
-                json.dump(self.config_dict, f)
-
             with open(os.path.join(save_config_folder, 'idx_actuators_dict.json'), 'w') as f:
                 json.dump(self.idx_actuators_dict, f)
 
             # Save the initial qpos to a file.
             with open(os.path.join(save_config_folder, 'initial_qpos.json'), 'w') as f:
                 json.dump(dict_initial_qpos, f)
+
+            # Save the robot config (constants from the robot_config module) to JSON.
+            robot_config_dict = {}
+            robot_config_dict["action_size"] = self.action_space.shape[0]
+            robot_config_dict["state_size"] = self.observation_space["state"].shape[0]
+            robot_config_dict["privileged_state_size"] = self.observation_space["privileged_state"].shape[0]
+            for key in sorted(vars(self._robot_config).keys()):
+                if key.startswith('_'):
+                    continue
+                value = getattr(self._robot_config, key)
+                if callable(value) or isinstance(value, type(os)):
+                    continue
+                robot_config_dict[key] = value
+            with open(os.path.join(save_config_folder, 'robot_config.json'), 'w') as f:
+                json.dump(robot_config_dict, f, indent=2, default=str)
 
     def _sensor_data(self, data: mujoco.mjx.Data, sensor_name: str) -> jax.Array:
         ''' Get the sensor data. '''
