@@ -67,19 +67,12 @@ def layer_init(layer, bias_const=0.0):
 class Agent(nn.Module):
     """Actor sees policy ``state``; critic sees ``privileged_state`` (asymmetric PPO) when obs is a Dict."""
 
-    def __init__(self, env_observation_space: gym.spaces.Space, env_action_space: gym.spaces.Space):
+    def __init__(self, env_priviliged_state_size: int, env_state_size: int, env_action_size: int):
         super().__init__()
-        ss = env_observation_space
-        if isinstance(ss, gym.spaces.Dict):
-            self._priv_dim = int(np.prod(ss["privileged_state"].shape))
-            self._policy_dim = int(np.prod(ss["state"].shape))
-        else:
-            self._priv_dim = None
-            self._policy_dim = int(np.prod(ss.shape))
-        act_dim = int(np.prod(env_action_space.shape))
-        critic_in = self._priv_dim if self._priv_dim is not None else self._policy_dim
+        # Flattened Dict obs order (sorted keys): privileged_state then state.
+        self._priv_dim = env_priviliged_state_size
         self.critic = nn.Sequential(
-            layer_init(nn.Linear(critic_in, 512)),
+            layer_init(nn.Linear(env_priviliged_state_size, 512)),
             nn.LayerNorm(512),
             nn.SiLU(),
             layer_init(nn.Linear(512, 256)),
@@ -91,7 +84,7 @@ class Agent(nn.Module):
             layer_init(nn.Linear(128, 1)),
         )
         self.actor_mean = nn.Sequential(
-            layer_init(nn.Linear(self._policy_dim, 512)),
+            layer_init(nn.Linear(env_state_size, 512)),
             nn.LayerNorm(512),
             nn.SiLU(),
             layer_init(nn.Linear(512, 256)),
@@ -100,9 +93,9 @@ class Agent(nn.Module):
             layer_init(nn.Linear(256, 128)),
             nn.LayerNorm(128),
             nn.SiLU(),
-            layer_init(nn.Linear(128, act_dim)),
+            layer_init(nn.Linear(128, env_action_size)),
         )
-        self.actor_logstd = nn.Parameter(torch.zeros(1, np.prod(env_action_space.shape)))
+        self.actor_logstd = nn.Parameter(torch.zeros(1, env_action_size))
 
     def _policy_value_obs(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         if self._priv_dim is not None:
@@ -136,6 +129,15 @@ class Agent(nn.Module):
         action = probs.sample()
         return action
 
+    def load_checkpoint(self, path):
+        """Load weights from a raw ``state_dict`` or an skrl checkpoint dict (``model`` / ``optimizer``)."""
+        ckpt = torch.load(path, map_location="cpu", weights_only=False)
+        if isinstance(ckpt, dict) and "model" in ckpt:
+            state_dict = ckpt["model"]
+        else:
+            state_dict = ckpt
+        self.load_state_dict(state_dict)
+
 
 class PPO(skrl.agents.torch.Agent):
     def __init__(self, env, args, cfg):
@@ -154,9 +156,10 @@ class PPO(skrl.agents.torch.Agent):
         torch.manual_seed(args.seed)
         torch.backends.cudnn.deterministic = args.torch_deterministic
         
-        env_observation_space = env.observation_space
-        env_action_space = env.action_space
-        self.agent = Agent(env_observation_space, env_action_space).to(device)
+        env_priviliged_state_size = env.observation_space["privileged_state"].shape[0]
+        env_state_size = env.observation_space["state"].shape[0]
+        env_action_size = env.action_space.shape[0]
+        self.agent = Agent(env_priviliged_state_size, env_state_size, env_action_size).to(device)
         # skrl base agent expects wrapped models to expose a `.device` attribute
         self.agent.device = device
         self.optimizer = optim.Adam(self.agent.parameters(), lr=args.learning_rate, eps=1e-5)
