@@ -9,6 +9,7 @@ if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
 
 import jax
 import time
+import json
 import mujoco
 import mujoco.mjx
 import numpy as np
@@ -71,7 +72,7 @@ class BipedSim:
     class BipedModel:
         mjmodel: mujoco.mjx.Model
 
-    def __init__(self):
+    def __init__(self, save_config_folder: str = None):
 
         self._mjx_math = mjx_math
         self._robot_config = robot_config
@@ -208,6 +209,39 @@ class BipedSim:
                 ),
             }
         )
+
+        self.config_dict = {
+            "ctrl_dt": self.ctrl_dt,
+            "n_substeps": self._n_substeps,
+            "dt": self.dt,
+            "history_len": self.history_len,
+            "action_size": self.action_space.shape[0],
+            "state_size": self.observation_space["state"].shape[0],
+            "privileged_state_size": self.observation_space["privileged_state"].shape[0],
+        }
+
+        # Initial configuration.
+        dict_initial_qpos = {}
+        for i in range(self._model.njnt): # First joint is freejoint.
+            name = self._model.joint(i).name
+            dict_initial_qpos[name] = float(self._model.keyframe("home").qpos[self._model.joint(name).qposadr[0]])
+
+        # Save config files.
+        if save_config_folder is not None:
+            with open(os.path.join(save_config_folder, 'policy_actuator_mapping.json'), 'w') as f:
+                json.dump({
+                'actuated_joint_names_to_policy_idx_dict': self.actuated_joint_names_to_policy_idx_dict,
+                }, f)
+
+            with open(os.path.join(save_config_folder, 'config.json'), 'w') as f:
+                json.dump(self.config_dict, f)
+
+            with open(os.path.join(save_config_folder, 'idx_actuators_dict.json'), 'w') as f:
+                json.dump(self.idx_actuators_dict, f)
+
+            # Save the initial qpos to a file.
+            with open(os.path.join(save_config_folder, 'initial_qpos.json'), 'w') as f:
+                json.dump(dict_initial_qpos, f)
 
     def _sensor_data(self, data: mujoco.mjx.Data, sensor_name: str) -> jax.Array:
         ''' Get the sensor data. '''

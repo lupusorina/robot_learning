@@ -55,15 +55,15 @@ if __name__ == "__main__":
     seed = cli_args.seed
     if cli_args.train:
         experiment_name = datetime.datetime.now().strftime("%y-%m-%d_%H-%M-%S")
-        run_name = cli_args.run_name.strip().replace(" ", "_")
-        if run_name:
-            experiment_name = f"{experiment_name}_{run_name}"
     else:
         experiment_name = "eval"
     cfg["experiment"]["experiment_name"] = experiment_name
 
     # set status bar title
-    print(f"\033]2;{experiment_name}\033\\", end="", flush=True)
+    print(f"Experiment name: {experiment_name}")
+    # Create folder for config files.
+    config_folder = f"runs/{experiment_name}"
+    os.makedirs(config_folder, exist_ok=True)
 
     set_seed(seed)
 
@@ -71,7 +71,8 @@ if __name__ == "__main__":
     # env_name = "Pendulum-v1"
     if env_name == "biped":
         import envs.biped as biped
-        env = biped.VectorEnv(biped.BipedSim(), num_envs=8192)
+        config_folder = f"runs/{experiment_name}"
+        env = biped.VectorEnv(biped.BipedSim(save_config_folder=config_folder), num_envs=8192)
     else:
         env = gym.make_vec(env_name, num_envs=100, vectorization_mode="sync")
     env_not_wrapped = env
