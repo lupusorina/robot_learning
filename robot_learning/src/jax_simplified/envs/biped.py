@@ -337,7 +337,8 @@ class BipedSim:
         phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
 
         # Initialize the observation.
-        current_obs = self._compute_current_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase)
+        rng, key_obs = jax.random.split(rng)
+        current_obs = self._compute_current_policy_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase, key_obs)
         obs_hist = RingBuffer.init(current_obs, self.history_len)
         contact0 = jnp.array(
             [self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id]
@@ -382,7 +383,6 @@ class BipedSim:
         up_B = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
         q_joints = data.qpos[7:]
         q_vel = data.qvel[6:]
-        # TODO: add noise to the observation.
         ph = jnp.concatenate([jnp.cos(phase), jnp.sin(phase)])
         return jnp.concatenate([
             linvel,
@@ -393,7 +393,37 @@ class BipedSim:
             q_vel,
             last_act,
             ph,
-        ]).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
+        ])
+
+    def _add_observation_noise(self, obs: jax.Array, rng: jax.Array) -> jax.Array:
+        rc = self._robot_config
+        k = jax.random.split(rng, 5)
+        u = lambda i, n, b: jax.random.uniform(k[i], (n,), minval=-b, maxval=b)
+        n_joints = self._model.nv - 6
+        noise = jnp.concatenate([
+            u(0, 3, rc.OBS_NOISE_BASE_LIN_VEL),
+            u(1, 3, rc.OBS_NOISE_BASE_ANG_VEL),
+            u(2, 3, rc.OBS_NOISE_BASE_ROT),
+            jnp.zeros((3,), obs.dtype),
+            u(3, n_joints, rc.OBS_NOISE_JOINT_POS),
+            u(4, n_joints, rc.OBS_NOISE_JOINT_VEL),
+            jnp.zeros((self.action_space.shape[0],), obs.dtype),
+            jnp.zeros((4,), obs.dtype),
+        ])
+        return obs + noise
+
+    def _compute_current_policy_obs(
+        self,
+        data: mujoco.mjx.Data,
+        command: jax.Array,
+        last_act: jax.Array,
+        phase: jax.Array,
+        rng: jax.Array,
+    ) -> jax.Array:
+        x = self._compute_current_obs(data, command, last_act, phase)
+        if robot_config.ADD_OBSERVATION_NOISE:
+            x = self._add_observation_noise(x, rng)
+        return x.clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def _compute_current_privileged_obs(
         self,
@@ -433,7 +463,7 @@ class BipedSim:
             ]
         ).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
-    def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
+    def step(self, model: BipedModel, state: BipedState, action: jax.Array, rng: jax.Array) -> BipedState:
         ''' Step the model. '''
 
         # Clip action between -1 and 1.
@@ -497,7 +527,8 @@ class BipedSim:
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
         feet_air_time = feet_air_time * (~contact)
         swing_peak = swing_peak * (~contact)
-        current_obs = self._compute_current_obs(data, state.command, action, phase)
+        rng, key_obs = jax.random.split(rng)
+        current_obs = self._compute_current_policy_obs(data, state.command, action, phase, key_obs)
         obs_hist = RingBuffer.push(state.obs_history, current_obs)
         current_priv = self._compute_current_privileged_obs(
             data, state.command, action, phase, contact, feet_air_time
@@ -693,8 +724,9 @@ class VectorEnv(gym.vector.VectorEnv):
             def reset_if_terminated(x, y):
                 return jnp.where(jnp.reshape(reset_mask, [reset_mask.shape[0]] + [1]*(len(x.shape) -1)), y, x)
             return jax.tree_util.tree_map(reset_if_terminated, states, reset_states)
-        def vmapped_step(model, states, actions):
-            return jax.vmap(self.sim.step, in_axes=[self.model_batch_axes, 0, 0])(model, states, actions)
+        def vmapped_step(model, states, actions, rng):
+            rng = jax.random.split(rng, self.num_envs)
+            return jax.vmap(self.sim.step, in_axes=[self.model_batch_axes, 0, 0, 0])(model, states, actions, rng)
         def vmapped_build_obs(state, rng):
             rng = jax.random.split(rng, self.num_envs)
             return jax.vmap(self.sim.build_obs)(state, rng)
@@ -734,9 +766,9 @@ class VectorEnv(gym.vector.VectorEnv):
         self.renderers = [] # clear renderers
 
     def step(self, actions: jax.Array) -> tuple[dict, jax.Array, jax.Array, jax.Array, dict]:
-        states = self._vmapped_step(self.model, self.states, actions)
-        self.rng, key = jax.random.split(self.rng)
-        obs, info = self._vmapped_build_obs(states, key)
+        self.rng, key_step, key_obs = jax.random.split(self.rng, 3)
+        states = self._vmapped_step(self.model, self.states, actions, key_step)
+        obs, info = self._vmapped_build_obs(states, key_obs)
         reward, terminated, truncated = self._vmapped_get_reward(info)
         reset_mask = terminated | truncated
 
