@@ -1,12 +1,5 @@
 import os
-if 'DISPLAY' not in os.environ:
-    # Enable headless rendering with EGL if no display is available.
-    os.environ['MUJOCO_GL'] = 'egl'
-
-# By default XLA pre-allocates much more GPU memory than needed, this reduces it.
-if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
-    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
-
+import pprint
 import jax
 import time
 import json
@@ -79,21 +72,16 @@ class BipedSim:
 
         # Initialize the model.
         self._model = mujoco.MjModel.from_xml_path(robot_config.XML_PATH)
-        self._model.opt.timestep = 0.001
+        self._model.opt.timestep = robot_config.SIM_DT
         self.ctrl_dt = robot_config.CTRL_DT
-        self._sim_dt = robot_config.SIM_DT
-        self._n_substeps = int(round(self.ctrl_dt / self._sim_dt))
-        self.dt = self.ctrl_dt
-        self.history_len = robot_config.HISTORY_LEN
+        self.n_substeps = robot_config.N_SUBSTEPS
+        self.dt = self._model.opt.timestep * self.n_substeps
 
-        # Control-step limit per episode (truncation).
-        self.max_episode_steps = 1000
-
-        # Initialize the model.
         self._mjx_model = mujoco.mjx.put_model(self._model)
         self._dof_armature_tree_key = self._find_dof_armature_tree_key()
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
+
         if robot_config.RANDOMIZE_ARMATURE:
             print(
                 "Domain randomization: actuator armature enabled; "
@@ -101,6 +89,9 @@ class BipedSim:
                 f"range=U({robot_config.ARMATURE_MIN}, {robot_config.ARMATURE_MAX}), "
                 "sampled per environment and per non-root joint."
             )
+
+        self.max_episode_steps = 1000
+        self.history_len = robot_config.HISTORY_LEN
 
         # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
@@ -160,22 +151,31 @@ class BipedSim:
         for i in range(0, self._model.nu):
             self.idx_actuators_dict[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)] = i
 
+        print("self.idx_actuators_dict:")
+        pprint.pprint(self.idx_actuators_dict, indent=4)
+
+        # Note: the Ankle is not actuated, so we don't include it in the action space.
         self.actuated_joint_names_to_policy_idx_dict = {
             "L_HAA": 0,
             "L_HFE": 1,
             "L_KFE": 2,
-            "R_HAA": 3,
-            "R_HFE": 4,
-            "R_KFE": 5,
+            "R_HAA": 4,
+            "R_HFE": 5,
+            "R_KFE": 6,
             }
+
         for name in self.actuated_joint_names_to_policy_idx_dict:
             assert name in self.idx_actuators_dict, f"{name} is not in {self.idx_actuators_dict.keys()}"
 
         # MuJoCo actuator mapping.
-        self.joint_names_to_actuator_idx_dict = { name: int(self._model.joint(name).qposadr[0] - 7) \
+        self.joint_names_to_act_idx_dict = { name: int(self._model.joint(name).qposadr[0] - 7) \
                                                 for name in self.idx_actuators_dict.keys() }
-        self.policy_idx_to_mujoco_actuator_idx_dict = { self.actuated_joint_names_to_policy_idx_dict[name]: self.joint_names_to_actuator_idx_dict[name] 
-                                    for name in self.actuated_joint_names_to_policy_idx_dict }
+        self.policy_idx_to_mujoco_act_idx_dict = {}
+        for name in self.actuated_joint_names_to_policy_idx_dict:
+            self.policy_idx_to_mujoco_act_idx_dict[self.actuated_joint_names_to_policy_idx_dict[name]] = self.joint_names_to_act_idx_dict[name]
+
+        print("self.policy_idx_to_mujoco_act_idx_dict:")
+        pprint.pprint(self.policy_idx_to_mujoco_act_idx_dict, indent=4)
 
         # Initialize the sensor adresses.
         self._sensor_adr = {}
@@ -203,9 +203,13 @@ class BipedSim:
         obs, _ = self.build_obs(self.reset(self.make_model(), jax.random.PRNGKey(0)), jax.random.PRNGKey(0))
         self.observation_space = gym.spaces.Dict(
             {
-                "state": gym.spaces.Box(low=-10.0, high=10.0, shape=obs["state"].shape),
+                "state": gym.spaces.Box(low=-robot_config.LIMIT_OBSERVATIONS,
+                                        high=robot_config.LIMIT_OBSERVATIONS,
+                                        shape=obs["state"].shape),
                 "privileged_state": gym.spaces.Box(
-                    low=-10.0, high=10.0, shape=obs["privileged_state"].shape
+                    low=-robot_config.LIMIT_OBSERVATIONS,
+                    high=robot_config.LIMIT_OBSERVATIONS,
+                    shape=obs["privileged_state"].shape,
                 ),
             }
         )
@@ -218,23 +222,14 @@ class BipedSim:
 
         # Save config files.
         if save_config_folder is not None:
-            with open(os.path.join(save_config_folder, 'policy_actuator_mapping.json'), 'w') as f:
-                json.dump({
-                'actuated_joint_names_to_policy_idx_dict': self.actuated_joint_names_to_policy_idx_dict,
-                }, f)
-
-            with open(os.path.join(save_config_folder, 'idx_actuators_dict.json'), 'w') as f:
-                json.dump(self.idx_actuators_dict, f)
-
-            # Save the initial qpos to a file.
-            with open(os.path.join(save_config_folder, 'initial_qpos.json'), 'w') as f:
-                json.dump(dict_initial_qpos, f)
-
             # Save the robot config (constants from the robot_config module) to JSON.
             robot_config_dict = {}
             robot_config_dict["action_size"] = self.action_space.shape[0]
             robot_config_dict["state_size"] = self.observation_space["state"].shape[0]
             robot_config_dict["privileged_state_size"] = self.observation_space["privileged_state"].shape[0]
+            robot_config_dict["actuated_joint_names_to_policy_idx_dict"] = self.actuated_joint_names_to_policy_idx_dict
+            robot_config_dict["idx_actuators_dict"] = self.idx_actuators_dict
+            robot_config_dict["initial_qpos"] = dict_initial_qpos
             for key in sorted(vars(self._robot_config).keys()):
                 if key.startswith('_'):
                     continue
@@ -398,7 +393,7 @@ class BipedSim:
             q_vel,
             last_act,
             ph,
-        ]).clip(-10.0, 10.0)
+        ]).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def _compute_current_privileged_obs(
         self,
@@ -436,7 +431,7 @@ class BipedSim:
                 feet_vel_I,
                 feet_air_time,
             ]
-        ).clip(-10.0, 10.0)
+        ).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
         ''' Step the model. '''
@@ -447,7 +442,7 @@ class BipedSim:
             if policy_idx is None:
                 continue
             action_complete = action_complete.at[
-                self.policy_idx_to_mujoco_actuator_idx_dict[policy_idx]
+                self.policy_idx_to_mujoco_act_idx_dict[policy_idx]
             ].set(action[policy_idx])
 
         action_offsets = jnp.where(
@@ -466,7 +461,7 @@ class BipedSim:
             return d, None
 
         # Step the model.
-        data, _ = jax.lax.scan(sim_step, data, (), self._n_substeps)
+        data, _ = jax.lax.scan(sim_step, data, (), self.n_substeps)
 
         # Check if the feet are in contact with the ground.
         contact = jnp.array([self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id])
@@ -769,9 +764,8 @@ class VectorEnv(gym.vector.VectorEnv):
         return images
 
 
-
 if __name__ == "__main__":
-    print("building sim")
+    print("Building simulator...")
     sim = BipedSim()
 
     start_build_time = time.time()
@@ -780,9 +774,6 @@ if __name__ == "__main__":
     assert set(obs.keys()) == {"state", "privileged_state"}
 
     obs, reward, terminated, truncated, info = env.step(jnp.zeros([env.num_envs, sim.action_space.shape[0]]))
-    print("step terminated")
-    obs, reward, terminated, truncated, info = env.step(jnp.zeros([env.num_envs, sim.action_space.shape[0]]))
-    print("step terminated")
 
     print(f"build time: {time.time() - start_build_time}")
 
@@ -795,9 +786,6 @@ if __name__ == "__main__":
     for i in range(steps):
         print(f'---- step {i} ----')
         obs, reward, terminated, truncated, info = env.step(jnp.zeros([env.num_envs, sim.action_space.shape[0]]))
-        print("step_count:", info["state"].step_count[0])
-        print(f"terminated: {terminated[0]}")
-        print(f"truncated: {truncated[0]}")
         start_render_time = time.time()    
         frames.append(tile_images(env.render(nb_envs_to_render)))
         total_render_time += time.time() - start_render_time
@@ -808,7 +796,6 @@ if __name__ == "__main__":
 
     save_video(frames, "batch_render.mp4", fps=1/env.dt)
     print(f"final time: {info['state'].mjdata.time[0]}")
-
 
     stats = jax.devices()[0].memory_stats()
     print(f"peak memory usage: {stats['peak_bytes_in_use'] / 1024 / 1024 / 1024:.2f} GB")
