@@ -129,6 +129,10 @@ class Agent(nn.Module):
         action = probs.sample()
         return action
 
+    def get_action_deterministic(self, x):
+        action_mean = self.actor_mean(x)
+        return action_mean
+
     def load_checkpoint(self, path):
         """Load weights from a raw ``state_dict`` or an skrl checkpoint dict (``model`` / ``optimizer``)."""
         ckpt = torch.load(path, map_location="cpu", weights_only=False)
