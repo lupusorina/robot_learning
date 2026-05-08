@@ -74,8 +74,8 @@ class BipedSim:
         self._model = mujoco.MjModel.from_xml_path(robot_config.XML_PATH)
         self._model.opt.timestep = robot_config.SIM_DT
         self.ctrl_dt = robot_config.CTRL_DT
-        self.n_substeps = robot_config.N_SUBSTEPS
-        self.dt = self._model.opt.timestep * self.n_substeps
+        self.n_substeps = int(self.ctrl_dt / self._model.opt.timestep)
+        self.dt = self.ctrl_dt
 
         self._mjx_model = mujoco.mjx.put_model(self._model)
         self._dof_armature_tree_key = self._find_dof_armature_tree_key()
@@ -435,6 +435,9 @@ class BipedSim:
 
     def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
         ''' Step the model. '''
+
+        # Clip action between -1 and 1.
+        action = jnp.clip(action, -1.0, 1.0)
 
         # Create normalized actions in MuJoCo actuator order.
         action_complete = jnp.zeros(self._model.nu)
