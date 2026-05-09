@@ -1,4 +1,9 @@
 import os
+
+# JAX/XLA default pre-allocation can starve PyTorch on single-GPU setups; override with env if unset.
+if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
+
 import pprint
 import jax
 import time
