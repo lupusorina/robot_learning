@@ -67,3 +67,27 @@ OBS_NOISE_BASE_ANG_VEL = 0.3
 OBS_NOISE_BASE_ROT = 0.05
 OBS_NOISE_JOINT_POS = 0.01
 OBS_NOISE_JOINT_VEL = 0.5
+
+# Observation scaling: each block is multiplied by its factor (elementwise on that
+# block). Applied after additive observation noise for the actor, then clipped.
+# All keys live in OBS_SCALE. Keys used only on the critic tail are marked in the
+# comments below; the rest appear on the actor and are reused on the critic where
+# the same quantity is repeated (gyro, upvector, linvel, joint errors, joint vels).
+OBS_SCALE = {
+    "base_lin_vel": 1.0,
+    "base_ang_vel": 0.25,
+    "upvector": 1.0,
+    "command": 1.0,
+    "joint_pos_err": 0.5,
+    "joint_vel": 0.05,
+    "last_action": 1.0,
+    "phase": 1.0,
+    # Critic suffix only (after policy-shaped prefix):
+    "accelerometer": 0.05,
+    "global_ang_vel": 1.0,
+    "baselink_height": 1.0,
+    "actuator_force": 0.5,
+    "contact": 1.0,
+    "feet_lin_vel": 0.25,
+    "feet_air_time": 1.0,
+}

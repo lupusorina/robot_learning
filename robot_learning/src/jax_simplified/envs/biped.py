@@ -160,6 +160,50 @@ class BipedSim:
             low=-1.0, high=1.0, shape=(int(self._model.nu),), dtype=np.float32
         )
 
+        n_joint = int(self._default_q_joints.shape[0])
+        nu = int(self._model.nu)
+        n_feet = len(robot_config.FEET_SITES)
+        feet_lin_vel_dim = sum(
+            int(self._model.sensor_dim[self._model.sensor(f"{s}_global_linvel").id])
+            for s in robot_config.FEET_SITES
+        )
+        sc = robot_config.OBS_SCALE
+
+        def _tile(key: str, n: int) -> jax.Array:
+            return jnp.full((n,), jnp.asarray(sc[key], dtype=jnp.float32))
+
+        self._actor_obs_scale = jnp.concatenate(
+            [
+                _tile("base_lin_vel", 3),
+                _tile("base_ang_vel", 3),
+                _tile("upvector", 3),
+                _tile("command", 3),
+                _tile("joint_pos_err", n_joint),
+                _tile("joint_vel", n_joint),
+                _tile("last_action", nu),
+                _tile("phase", 2 * n_feet),
+            ]
+        )
+        self._critic_suffix_obs_scale = jnp.concatenate(
+            [
+                _tile("base_ang_vel", 3),
+                _tile("accelerometer", 3),
+                _tile("upvector", 3),
+                _tile("base_lin_vel", 3),
+                _tile("global_ang_vel", 3),
+                _tile("joint_pos_err", n_joint),
+                _tile("joint_vel", n_joint),
+                jnp.asarray([sc["baselink_height"]], dtype=jnp.float32),
+                _tile("actuator_force", nu),
+                _tile("contact", n_feet),
+                _tile("feet_lin_vel", feet_lin_vel_dim),
+                _tile("feet_air_time", n_feet),
+            ]
+        )
+        self._privileged_obs_scale = jnp.concatenate(
+            [self._actor_obs_scale, self._critic_suffix_obs_scale]
+        )
+
         # Initialize the sensor adresses.
         self._sensor_adr = {}
         for name in [
@@ -408,6 +452,7 @@ class BipedSim:
         x = self._compute_current_obs(data, command, last_act, phase)
         if robot_config.ADD_OBSERVATION_NOISE:
             x = self._add_observation_noise(x, rng)
+        x = x * self._actor_obs_scale
         return x.clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def _compute_current_privileged_obs(
@@ -432,22 +477,25 @@ class BipedSim:
         q_vel_priv = q_vel
         baselink_height = data.qpos[2]
         feet_vel_I = data.sensordata[self._foot_global_linvel_sensor_adr].ravel()
-        return jnp.concatenate(
-            [
-                current_state,
-                gyro,
-                accelerometer,
-                up_B,
-                linvel,
-                global_angvel,
-                q_err_priv,
-                q_vel_priv,
-                jnp.array([baselink_height]),
-                data.actuator_force,
-                contact.astype(jnp.float32),
-                feet_vel_I,
-                feet_air_time,
-            ]
+        return (
+            jnp.concatenate(
+                [
+                    current_state,
+                    gyro,
+                    accelerometer,
+                    up_B,
+                    linvel,
+                    global_angvel,
+                    q_err_priv,
+                    q_vel_priv,
+                    jnp.array([baselink_height]),
+                    data.actuator_force,
+                    contact.astype(jnp.float32),
+                    feet_vel_I,
+                    feet_air_time,
+                ]
+            )
+            * self._privileged_obs_scale
         ).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def step(self, model: BipedModel, state: BipedState, action: jax.Array, rng: jax.Array) -> BipedState:
