@@ -1,10 +1,10 @@
 import os
 
 parent_dir = os.path.abspath(os.path.join(os.getcwd()))
-XML_PATH = os.path.join(parent_dir, '../assets/biped/xmls/biped_RL.xml')
-# XML_PATH = os.path.join(parent_dir, 'robot_learning/src/assets/biped/xmls/biped_RL.xml')
+XML_PATH = os.path.join(parent_dir, '../assets/biped/xmls/biped_point_feet_RL.xml')
+# XML_PATH = os.path.join(parent_dir, 'robot_learning/src/assets/biped/xmls/biped_point_feet_RL.xml')
 
-#XML_PATH = os.path.join(parent_dir, '../../assets/biped/xmls/biped_RL.xml')
+#XML_PATH = os.path.join(parent_dir, '../../assets/biped/xmls/biped_point_feet_RL.xml')
 
 ROOT_BODY = "base_link"
 FEET_SITES = ["l_foot", "r_foot"]
@@ -35,11 +35,9 @@ ACTION_TARGET_OFFSETS = {
     "L_HAA": (-0.20, 0.20),
     "L_HFE": (-0.70, 0.90),
     "L_KFE": (-0.90, 1.10),
-    "L_ANKLE": (0.0, 0.0),
     "R_HAA": (-0.20, 0.20),
     "R_HFE": (-0.70, 0.90),
     "R_KFE": (-0.90, 1.10),
-    "R_ANKLE": (0.0, 0.0),
 }
 
 HIP_JOINT_NAMES = ["HAA", "HFE"]
@@ -50,10 +48,9 @@ ANKLE_AA_JOINT_NAMES = []
 
 SIDES = ["L", "R"]
 
-                    # L_HAA L_HFE L_KFE L_ANKLE
-                    # R_HAA R_HFE R_KFE R_ANKLE
-COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0,  # left leg.
-                      1.0, 0.01, 0.01, 1.0]  # right leg.
+                    # L_HAA L_HFE L_KFE
+                    # R_HAA R_HFE R_KFE
+COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0, 0.01, 0.01]
 
 
 CTRL_DT = 0.01

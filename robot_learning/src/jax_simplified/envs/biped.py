@@ -44,8 +44,6 @@ def replace_pytree(pytree, replacements: dict[str, jax.Array]):
 
 
 class BipedSim:
-    action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(8,))
-
     @struct.dataclass
     class BipedState:
         mjdata: mujoco.mjx.Data
@@ -151,7 +149,6 @@ class BipedSim:
         self._hip_indices = get_joint_indices(robot_config.HIP_JOINT_NAMES)
         self._knee_indices = get_joint_indices(robot_config.KNEE_JOINT_NAMES)
 
-        # Mapping from joint names to the PPO action indices.
         self.idx_actuators_dict = {}
         for i in range(0, self._model.nu):
             self.idx_actuators_dict[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)] = i
@@ -159,28 +156,9 @@ class BipedSim:
         print("self.idx_actuators_dict:")
         pprint.pprint(self.idx_actuators_dict, indent=4)
 
-        # Note: the Ankle is not actuated, so we don't include it in the action space.
-        self.actuated_joint_names_to_policy_idx_dict = {
-            "L_HAA": 0,
-            "L_HFE": 1,
-            "L_KFE": 2,
-            "R_HAA": 4,
-            "R_HFE": 5,
-            "R_KFE": 6,
-            }
-
-        for name in self.actuated_joint_names_to_policy_idx_dict:
-            assert name in self.idx_actuators_dict, f"{name} is not in {self.idx_actuators_dict.keys()}"
-
-        # MuJoCo actuator mapping.
-        self.joint_names_to_act_idx_dict = { name: int(self._model.joint(name).qposadr[0] - 7) \
-                                                for name in self.idx_actuators_dict.keys() }
-        self.policy_idx_to_mujoco_act_idx_dict = {}
-        for name in self.actuated_joint_names_to_policy_idx_dict:
-            self.policy_idx_to_mujoco_act_idx_dict[self.actuated_joint_names_to_policy_idx_dict[name]] = self.joint_names_to_act_idx_dict[name]
-
-        print("self.policy_idx_to_mujoco_act_idx_dict:")
-        pprint.pprint(self.policy_idx_to_mujoco_act_idx_dict, indent=4)
+        self.action_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(int(self._model.nu),), dtype=np.float32
+        )
 
         # Initialize the sensor adresses.
         self._sensor_adr = {}
@@ -232,7 +210,6 @@ class BipedSim:
             robot_config_dict["action_size"] = self.action_space.shape[0]
             robot_config_dict["state_size"] = self.observation_space["state"].shape[0]
             robot_config_dict["privileged_state_size"] = self.observation_space["privileged_state"].shape[0]
-            robot_config_dict["actuated_joint_names_to_policy_idx_dict"] = self.actuated_joint_names_to_policy_idx_dict
             robot_config_dict["idx_actuators_dict"] = self.idx_actuators_dict
             robot_config_dict["initial_qpos"] = dict_initial_qpos
             for key in sorted(vars(self._robot_config).keys()):
@@ -382,19 +359,20 @@ class BipedSim:
         )
 
     def _compute_current_obs(self, data: mujoco.mjx.Data, command: jax.Array, last_act: jax.Array, phase: jax.Array) -> jax.Array:
-        ''' Compute the current observation. Should be feasible on hardware. '''
+        ''' Policy observation from IMU, command, joint errors / velocities, last action, gait phase. '''
         linvel = self._sensor_data(data, self._robot_config.LOCAL_LINVEL_SENSOR)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
         up_B = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
         q_joints = data.qpos[7:]
         q_vel = data.qvel[6:]
+        q_err = q_joints - self._default_q_joints
         ph = jnp.concatenate([jnp.cos(phase), jnp.sin(phase)])
         return jnp.concatenate([
             linvel,
             gyro,
             up_B,
             command,
-            q_joints - self._default_q_joints,
+            q_err,
             q_vel,
             last_act,
             ph,
@@ -405,13 +383,15 @@ class BipedSim:
         k = jax.random.split(rng, 5)
         u = lambda i, n, b: jax.random.uniform(k[i], (n,), minval=-b, maxval=b)
         n_joints = self._model.nv - 6
+        n_q = u(3, n_joints, rc.OBS_NOISE_JOINT_POS)
+        n_qd = u(4, n_joints, rc.OBS_NOISE_JOINT_VEL)
         noise = jnp.concatenate([
             u(0, 3, rc.OBS_NOISE_BASE_LIN_VEL),
             u(1, 3, rc.OBS_NOISE_BASE_ANG_VEL),
             u(2, 3, rc.OBS_NOISE_BASE_ROT),
             jnp.zeros((3,), obs.dtype),
-            u(3, n_joints, rc.OBS_NOISE_JOINT_POS),
-            u(4, n_joints, rc.OBS_NOISE_JOINT_VEL),
+            n_q,
+            n_qd,
             jnp.zeros((self.action_space.shape[0],), obs.dtype),
             jnp.zeros((4,), obs.dtype),
         ])
@@ -439,7 +419,7 @@ class BipedSim:
         contact: jax.Array,
         feet_air_time: jax.Array,
     ) -> jax.Array:
-        """Privileged features for the value function: policy state plus clean proprioceptive / sim signals."""
+        """Privileged features: policy-shaped prefix plus extra sim signals."""
         current_state = self._compute_current_obs(data, command, last_act, phase)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
         accelerometer = self._sensor_data(data, self._robot_config.ACCELEROMETER_SENSOR)
@@ -448,6 +428,8 @@ class BipedSim:
         global_angvel = self._sensor_data(data, self._robot_config.GLOBAL_ANGVEL_SENSOR)
         q_joints = data.qpos[7:]
         q_vel = data.qvel[6:]
+        q_err_priv = q_joints - self._default_q_joints
+        q_vel_priv = q_vel
         baselink_height = data.qpos[2]
         feet_vel_I = data.sensordata[self._foot_global_linvel_sensor_adr].ravel()
         return jnp.concatenate(
@@ -458,8 +440,8 @@ class BipedSim:
                 up_B,
                 linvel,
                 global_angvel,
-                q_joints - self._default_q_joints,
-                q_vel,
+                q_err_priv,
+                q_vel_priv,
                 jnp.array([baselink_height]),
                 data.actuator_force,
                 contact.astype(jnp.float32),
@@ -474,19 +456,10 @@ class BipedSim:
         # Clip action between -1 and 1.
         action = jnp.clip(action, -1.0, 1.0)
 
-        # Create normalized actions in MuJoCo actuator order.
-        action_complete = jnp.zeros(self._model.nu)
-        for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
-            if policy_idx is None:
-                continue
-            action_complete = action_complete.at[
-                self.policy_idx_to_mujoco_act_idx_dict[policy_idx]
-            ].set(action[policy_idx])
-
         action_offsets = jnp.where(
-            action_complete >= 0.0,
-            action_complete * self._action_target_offsets[:, 1],
-            -action_complete * self._action_target_offsets[:, 0],
+            action >= 0.0,
+            action * self._action_target_offsets[:, 1],
+            -action * self._action_target_offsets[:, 0],
         )
         motor_targets = self._default_q_joints + action_offsets
         motor_targets = jnp.clip(motor_targets, self._q_j_min, self._q_j_max)
