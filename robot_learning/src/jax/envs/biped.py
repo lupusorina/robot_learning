@@ -155,11 +155,6 @@ class Biped(mjx_env.MjxEnv):
     for i in range(0, self.mj_model.njnt):
         self.name_joints.append(mujoco.mj_id2name(self.mj_model, mujoco.mjtObj.mjOBJ_JOINT, i))
     print(f'  Name joints: {self.name_joints}')
-    # get the qpos index for the ankle joints
-    self.L_ANKLE_q_pos_idx = self.mj_model.joint('L_ANKLE').qposadr[0]
-    self.R_ANKLE_q_pos_idx = self.mj_model.joint('R_ANKLE').qposadr[0]
-    self.L_ANKLE_qvel_idx = self.L_ANKLE_q_pos_idx - 1
-    self.R_ANKLE_qvel_idx = self.R_ANKLE_q_pos_idx - 1
 
     list_joint_names_to_ignore = ['root']
     self.joint_idx_to_ignore_dict = {}
@@ -214,8 +209,8 @@ class Biped(mjx_env.MjxEnv):
         with open(os.path.join(save_config_folder, 'initial_qpos.json'), 'w') as f:
           json.dump(dict_initial_qpos, f)
 
-      # Copy over the biped_RL.xml file.
-      shutil.copy(XML_PATH, os.path.join(save_config_folder, 'biped_RL.xml'))
+      # Copy the MJCF used by this environment.
+      shutil.copy(XML_PATH, os.path.join(save_config_folder, os.path.basename(XML_PATH)))
 
     self._post_init()
 
@@ -527,9 +522,6 @@ class Biped(mjx_env.MjxEnv):
         * self._config.noise_config.level
         * q_j_noise_scale_without_spring
     )
-    # At ankle, put the joint_angles_without_spring to 0
-    noisy_joint_angles = noisy_joint_angles.at[self.L_ANKLE_q_pos_idx].set(0.0)
-    noisy_joint_angles = noisy_joint_angles.at[self.R_ANKLE_q_pos_idx].set(0.0)
 
     joint_vel = data.qvel[6:]
     joint_vel_without_spring = jp.array([joint_vel[i] for i in range(len(joint_vel)) if i not in self.joint_idx_to_ignore_dict.values()])
@@ -540,9 +532,6 @@ class Biped(mjx_env.MjxEnv):
         * self._config.noise_config.level
         * self._config.noise_config.scales.joint_vel
     )
-    # At ankle, put the joint_vel_without_spring to 0
-    noisy_joint_vel = noisy_joint_vel.at[self.L_ANKLE_qvel_idx].set(0.0)
-    noisy_joint_vel = noisy_joint_vel.at[self.R_ANKLE_qvel_idx].set(0.0)
 
     cos = jp.cos(info["phase"])
     sin = jp.sin(info["phase"])
@@ -563,8 +552,8 @@ class Biped(mjx_env.MjxEnv):
         noisy_gyro,  # 3
         noisy_up_B,  # 3
         info["command"],  # 3
-        noisy_joint_angles - self._default_q_joints_without_spring,  # 8
-        noisy_joint_vel,  # 8
+        noisy_joint_angles - self._default_q_joints_without_spring,  # nu
+        noisy_joint_vel,  # nu
         info["last_act"],  # 6
         phase,
     ])
@@ -584,7 +573,7 @@ class Biped(mjx_env.MjxEnv):
         joint_angles_without_spring - self._default_q_joints_without_spring,
         joint_vel,
         baselink_height_I,  # 1
-        data.actuator_force,  # 10
+        data.actuator_force,  # nu
         contact,  # 2
         feet_vel_I,  # 4*3
         info["feet_air_time"],  # 2
@@ -813,8 +802,7 @@ class Biped(mjx_env.MjxEnv):
 
   @property
   def action_size(self) -> int:
-    nb_joints = self.mj_model.njnt - 1 # First joint is freejoint.
-    return nb_joints - 2 - len(self.joint_idx_to_ignore_dict.keys())
+    return int(self.mj_model.nu)
 
   @property
   def mj_model(self) -> mujoco.MjModel:

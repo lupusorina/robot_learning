@@ -1,10 +1,10 @@
 import os
 
 parent_dir = os.path.abspath(os.path.join(os.getcwd()))
-XML_PATH = os.path.join(parent_dir, '../assets/biped/xmls/biped_RL.xml')
-# XML_PATH = os.path.join(parent_dir, 'robot_learning/src/assets/biped/xmls/biped_RL.xml')
+XML_PATH = os.path.join(parent_dir, '../assets/biped/xmls/biped_point_feet_RL.xml')
+# XML_PATH = os.path.join(parent_dir, 'robot_learning/src/assets/biped/xmls/biped_point_feet_RL.xml')
 
-#XML_PATH = os.path.join(parent_dir, '../../assets/biped/xmls/biped_RL.xml')
+#XML_PATH = os.path.join(parent_dir, '../../assets/biped/xmls/biped_point_feet_RL.xml')
 
 ROOT_BODY = "base_link"
 FEET_SITES = ["l_foot", "r_foot"]
@@ -35,11 +35,9 @@ ACTION_TARGET_OFFSETS = {
     "L_HAA": (-0.20, 0.20),
     "L_HFE": (-0.70, 0.90),
     "L_KFE": (-0.90, 1.10),
-    "L_ANKLE": (0.0, 0.0),
     "R_HAA": (-0.20, 0.20),
     "R_HFE": (-0.70, 0.90),
     "R_KFE": (-0.90, 1.10),
-    "R_ANKLE": (0.0, 0.0),
 }
 
 HIP_JOINT_NAMES = ["HAA", "HFE"]
@@ -50,15 +48,45 @@ ANKLE_AA_JOINT_NAMES = []
 
 SIDES = ["L", "R"]
 
-                    # L_HAA L_HFE L_KFE L_ANKLE
-                    # R_HAA R_HFE R_KFE R_ANKLE
-COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0,  # left leg.
-                      1.0, 0.01, 0.01, 1.0]  # right leg.
+                    # L_HAA L_HFE L_KFE
+                    # R_HAA R_HFE R_KFE
+COSTS_JOINT_ANGLES = [1.0, 0.01, 0.01, 1.0, 0.01, 0.01]
 
 
 CTRL_DT = 0.01
 SIM_DT = 0.002
 HISTORY_LEN = 3
-N_SUBSTEPS = 10
 
 LIMIT_OBSERVATIONS = 10.0
+
+ADD_OBSERVATION_NOISE = True
+
+OBS_NOISE_BASE_LIN_VEL = 0.3
+OBS_NOISE_BASE_ANG_VEL = 0.3
+OBS_NOISE_BASE_ROT = 0.05
+OBS_NOISE_JOINT_POS = 0.01
+OBS_NOISE_JOINT_VEL = 0.5
+
+# Observation scaling: each block is multiplied by its factor (elementwise on that
+# block). Applied after additive observation noise for the actor, then clipped.
+# All keys live in OBS_SCALE. Keys used only on the critic tail are marked in the
+# comments below; the rest appear on the actor and are reused on the critic where
+# the same quantity is repeated (gyro, upvector, linvel, joint errors, joint vels).
+OBS_SCALE = {
+    "base_lin_vel": 1.0,
+    "base_ang_vel": 0.25,
+    "upvector": 1.0,
+    "command": 1.0,
+    "joint_pos_err": 0.5,
+    "joint_vel": 0.05,
+    "last_action": 1.0,
+    "phase": 1.0,
+    # Critic suffix only (after policy-shaped prefix):
+    "accelerometer": 0.05,
+    "global_ang_vel": 1.0,
+    "baselink_height": 1.0,
+    "actuator_force": 0.5,
+    "contact": 1.0,
+    "feet_lin_vel": 0.25,
+    "feet_air_time": 1.0,
+}

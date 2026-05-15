@@ -1,4 +1,9 @@
 import os
+
+# JAX/XLA default pre-allocation can starve PyTorch on single-GPU setups; override with env if unset.
+if "XLA_PYTHON_CLIENT_MEM_FRACTION" not in os.environ:
+    os.environ["XLA_PYTHON_CLIENT_MEM_FRACTION"] = "0.1"
+
 import pprint
 import jax
 import time
@@ -39,8 +44,6 @@ def replace_pytree(pytree, replacements: dict[str, jax.Array]):
 
 
 class BipedSim:
-    action_space = gym.spaces.Box(low=-1.0, high=1.0, shape=(8,))
-
     @struct.dataclass
     class BipedState:
         mjdata: mujoco.mjx.Data
@@ -146,7 +149,6 @@ class BipedSim:
         self._hip_indices = get_joint_indices(robot_config.HIP_JOINT_NAMES)
         self._knee_indices = get_joint_indices(robot_config.KNEE_JOINT_NAMES)
 
-        # Mapping from joint names to the PPO action indices.
         self.idx_actuators_dict = {}
         for i in range(0, self._model.nu):
             self.idx_actuators_dict[mujoco.mj_id2name(self._model, mujoco.mjtObj.mjOBJ_ACTUATOR, i)] = i
@@ -154,28 +156,53 @@ class BipedSim:
         print("self.idx_actuators_dict:")
         pprint.pprint(self.idx_actuators_dict, indent=4)
 
-        # Note: the Ankle is not actuated, so we don't include it in the action space.
-        self.actuated_joint_names_to_policy_idx_dict = {
-            "L_HAA": 0,
-            "L_HFE": 1,
-            "L_KFE": 2,
-            "R_HAA": 4,
-            "R_HFE": 5,
-            "R_KFE": 6,
-            }
+        self.action_space = gym.spaces.Box(
+            low=-1.0, high=1.0, shape=(int(self._model.nu),), dtype=np.float32
+        )
 
-        for name in self.actuated_joint_names_to_policy_idx_dict:
-            assert name in self.idx_actuators_dict, f"{name} is not in {self.idx_actuators_dict.keys()}"
+        n_joint = int(self._default_q_joints.shape[0])
+        nu = int(self._model.nu)
+        n_feet = len(robot_config.FEET_SITES)
+        feet_lin_vel_dim = sum(
+            int(self._model.sensor_dim[self._model.sensor(f"{s}_global_linvel").id])
+            for s in robot_config.FEET_SITES
+        )
+        sc = robot_config.OBS_SCALE
 
-        # MuJoCo actuator mapping.
-        self.joint_names_to_act_idx_dict = { name: int(self._model.joint(name).qposadr[0] - 7) \
-                                                for name in self.idx_actuators_dict.keys() }
-        self.policy_idx_to_mujoco_act_idx_dict = {}
-        for name in self.actuated_joint_names_to_policy_idx_dict:
-            self.policy_idx_to_mujoco_act_idx_dict[self.actuated_joint_names_to_policy_idx_dict[name]] = self.joint_names_to_act_idx_dict[name]
+        def _tile(key: str, n: int) -> jax.Array:
+            return jnp.full((n,), jnp.asarray(sc[key], dtype=jnp.float32))
 
-        print("self.policy_idx_to_mujoco_act_idx_dict:")
-        pprint.pprint(self.policy_idx_to_mujoco_act_idx_dict, indent=4)
+        self._actor_obs_scale = jnp.concatenate(
+            [
+                _tile("base_lin_vel", 3),
+                _tile("base_ang_vel", 3),
+                _tile("upvector", 3),
+                _tile("command", 3),
+                _tile("joint_pos_err", n_joint),
+                _tile("joint_vel", n_joint),
+                _tile("last_action", nu),
+                _tile("phase", 2 * n_feet),
+            ]
+        )
+        self._critic_suffix_obs_scale = jnp.concatenate(
+            [
+                _tile("base_ang_vel", 3),
+                _tile("accelerometer", 3),
+                _tile("upvector", 3),
+                _tile("base_lin_vel", 3),
+                _tile("global_ang_vel", 3),
+                _tile("joint_pos_err", n_joint),
+                _tile("joint_vel", n_joint),
+                jnp.asarray([sc["baselink_height"]], dtype=jnp.float32),
+                _tile("actuator_force", nu),
+                _tile("contact", n_feet),
+                _tile("feet_lin_vel", feet_lin_vel_dim),
+                _tile("feet_air_time", n_feet),
+            ]
+        )
+        self._privileged_obs_scale = jnp.concatenate(
+            [self._actor_obs_scale, self._critic_suffix_obs_scale]
+        )
 
         # Initialize the sensor adresses.
         self._sensor_adr = {}
@@ -227,7 +254,6 @@ class BipedSim:
             robot_config_dict["action_size"] = self.action_space.shape[0]
             robot_config_dict["state_size"] = self.observation_space["state"].shape[0]
             robot_config_dict["privileged_state_size"] = self.observation_space["privileged_state"].shape[0]
-            robot_config_dict["actuated_joint_names_to_policy_idx_dict"] = self.actuated_joint_names_to_policy_idx_dict
             robot_config_dict["idx_actuators_dict"] = self.idx_actuators_dict
             robot_config_dict["initial_qpos"] = dict_initial_qpos
             for key in sorted(vars(self._robot_config).keys()):
@@ -337,7 +363,8 @@ class BipedSim:
         phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
 
         # Initialize the observation.
-        current_obs = self._compute_current_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase)
+        rng, key_obs = jax.random.split(rng)
+        current_obs = self._compute_current_policy_obs(data, command, jnp.zeros(self.action_space.shape[0]), phase, key_obs)
         obs_hist = RingBuffer.init(current_obs, self.history_len)
         contact0 = jnp.array(
             [self._geoms_colliding(data, g, self._floor_geom_id) for g in self._feet_geom_id]
@@ -376,24 +403,57 @@ class BipedSim:
         )
 
     def _compute_current_obs(self, data: mujoco.mjx.Data, command: jax.Array, last_act: jax.Array, phase: jax.Array) -> jax.Array:
-        ''' Compute the current observation. Should be feasible on hardware. '''
+        ''' Policy observation from IMU, command, joint errors / velocities, last action, gait phase. '''
         linvel = self._sensor_data(data, self._robot_config.LOCAL_LINVEL_SENSOR)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
         up_B = self._sensor_data(data, self._robot_config.GRAVITY_SENSOR)
         q_joints = data.qpos[7:]
         q_vel = data.qvel[6:]
-        # TODO: add noise to the observation.
+        q_err = q_joints - self._default_q_joints
         ph = jnp.concatenate([jnp.cos(phase), jnp.sin(phase)])
         return jnp.concatenate([
             linvel,
             gyro,
             up_B,
             command,
-            q_joints - self._default_q_joints,
+            q_err,
             q_vel,
             last_act,
             ph,
-        ]).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
+        ])
+
+    def _add_observation_noise(self, obs: jax.Array, rng: jax.Array) -> jax.Array:
+        rc = self._robot_config
+        k = jax.random.split(rng, 5)
+        u = lambda i, n, b: jax.random.uniform(k[i], (n,), minval=-b, maxval=b)
+        n_joints = self._model.nv - 6
+        n_q = u(3, n_joints, rc.OBS_NOISE_JOINT_POS)
+        n_qd = u(4, n_joints, rc.OBS_NOISE_JOINT_VEL)
+        noise = jnp.concatenate([
+            u(0, 3, rc.OBS_NOISE_BASE_LIN_VEL),
+            u(1, 3, rc.OBS_NOISE_BASE_ANG_VEL),
+            u(2, 3, rc.OBS_NOISE_BASE_ROT),
+            jnp.zeros((3,), obs.dtype),
+            n_q,
+            n_qd,
+            jnp.zeros((self.action_space.shape[0],), obs.dtype),
+            jnp.zeros((4,), obs.dtype),
+        ])
+        return obs + noise
+
+    def _compute_current_policy_obs(
+        self,
+        data: mujoco.mjx.Data,
+        command: jax.Array,
+        last_act: jax.Array,
+        phase: jax.Array,
+        rng: jax.Array,
+    ) -> jax.Array:
+        x = self._compute_current_obs(data, command, last_act, phase)
+        if robot_config.ADD_OBSERVATION_NOISE:
+            x = self._add_observation_noise(x, rng)
+        x = x * self._actor_obs_scale
+        return x.clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
     def _compute_current_privileged_obs(
         self,
@@ -404,7 +464,7 @@ class BipedSim:
         contact: jax.Array,
         feet_air_time: jax.Array,
     ) -> jax.Array:
-        """Privileged features for the value function: policy state plus clean proprioceptive / sim signals."""
+        """Privileged features: policy-shaped prefix plus extra sim signals."""
         current_state = self._compute_current_obs(data, command, last_act, phase)
         gyro = self._sensor_data(data, self._robot_config.GYRO_SENSOR)
         accelerometer = self._sensor_data(data, self._robot_config.ACCELEROMETER_SENSOR)
@@ -413,45 +473,41 @@ class BipedSim:
         global_angvel = self._sensor_data(data, self._robot_config.GLOBAL_ANGVEL_SENSOR)
         q_joints = data.qpos[7:]
         q_vel = data.qvel[6:]
+        q_err_priv = q_joints - self._default_q_joints
+        q_vel_priv = q_vel
         baselink_height = data.qpos[2]
         feet_vel_I = data.sensordata[self._foot_global_linvel_sensor_adr].ravel()
-        return jnp.concatenate(
-            [
-                current_state,
-                gyro,
-                accelerometer,
-                up_B,
-                linvel,
-                global_angvel,
-                q_joints - self._default_q_joints,
-                q_vel,
-                jnp.array([baselink_height]),
-                data.actuator_force,
-                contact.astype(jnp.float32),
-                feet_vel_I,
-                feet_air_time,
-            ]
+        return (
+            jnp.concatenate(
+                [
+                    current_state,
+                    gyro,
+                    accelerometer,
+                    up_B,
+                    linvel,
+                    global_angvel,
+                    q_err_priv,
+                    q_vel_priv,
+                    jnp.array([baselink_height]),
+                    data.actuator_force,
+                    contact.astype(jnp.float32),
+                    feet_vel_I,
+                    feet_air_time,
+                ]
+            )
+            * self._privileged_obs_scale
         ).clip(-robot_config.LIMIT_OBSERVATIONS, robot_config.LIMIT_OBSERVATIONS)
 
-    def step(self, model: BipedModel, state: BipedState, action: jax.Array) -> BipedState:
+    def step(self, model: BipedModel, state: BipedState, action: jax.Array, rng: jax.Array) -> BipedState:
         ''' Step the model. '''
 
         # Clip action between -1 and 1.
         action = jnp.clip(action, -1.0, 1.0)
 
-        # Create normalized actions in MuJoCo actuator order.
-        action_complete = jnp.zeros(self._model.nu)
-        for _, policy_idx in self.actuated_joint_names_to_policy_idx_dict.items():
-            if policy_idx is None:
-                continue
-            action_complete = action_complete.at[
-                self.policy_idx_to_mujoco_act_idx_dict[policy_idx]
-            ].set(action[policy_idx])
-
         action_offsets = jnp.where(
-            action_complete >= 0.0,
-            action_complete * self._action_target_offsets[:, 1],
-            -action_complete * self._action_target_offsets[:, 0],
+            action >= 0.0,
+            action * self._action_target_offsets[:, 1],
+            -action * self._action_target_offsets[:, 0],
         )
         motor_targets = self._default_q_joints + action_offsets
         motor_targets = jnp.clip(motor_targets, self._q_j_min, self._q_j_max)
@@ -497,7 +553,8 @@ class BipedSim:
         phase = jnp.fmod(state.phase + state.phase_dt + jnp.pi, 2 * jnp.pi) - jnp.pi
         feet_air_time = feet_air_time * (~contact)
         swing_peak = swing_peak * (~contact)
-        current_obs = self._compute_current_obs(data, state.command, action, phase)
+        rng, key_obs = jax.random.split(rng)
+        current_obs = self._compute_current_policy_obs(data, state.command, action, phase, key_obs)
         obs_hist = RingBuffer.push(state.obs_history, current_obs)
         current_priv = self._compute_current_privileged_obs(
             data, state.command, action, phase, contact, feet_air_time
@@ -693,8 +750,9 @@ class VectorEnv(gym.vector.VectorEnv):
             def reset_if_terminated(x, y):
                 return jnp.where(jnp.reshape(reset_mask, [reset_mask.shape[0]] + [1]*(len(x.shape) -1)), y, x)
             return jax.tree_util.tree_map(reset_if_terminated, states, reset_states)
-        def vmapped_step(model, states, actions):
-            return jax.vmap(self.sim.step, in_axes=[self.model_batch_axes, 0, 0])(model, states, actions)
+        def vmapped_step(model, states, actions, rng):
+            rng = jax.random.split(rng, self.num_envs)
+            return jax.vmap(self.sim.step, in_axes=[self.model_batch_axes, 0, 0, 0])(model, states, actions, rng)
         def vmapped_build_obs(state, rng):
             rng = jax.random.split(rng, self.num_envs)
             return jax.vmap(self.sim.build_obs)(state, rng)
@@ -734,9 +792,9 @@ class VectorEnv(gym.vector.VectorEnv):
         self.renderers = [] # clear renderers
 
     def step(self, actions: jax.Array) -> tuple[dict, jax.Array, jax.Array, jax.Array, dict]:
-        states = self._vmapped_step(self.model, self.states, actions)
-        self.rng, key = jax.random.split(self.rng)
-        obs, info = self._vmapped_build_obs(states, key)
+        self.rng, key_step, key_obs = jax.random.split(self.rng, 3)
+        states = self._vmapped_step(self.model, self.states, actions, key_step)
+        obs, info = self._vmapped_build_obs(states, key_obs)
         reward, terminated, truncated = self._vmapped_get_reward(info)
         reset_mask = terminated | truncated
 
