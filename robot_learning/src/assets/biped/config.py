@@ -22,12 +22,37 @@ DESIRED_HEIGHT = 0.56
 DESIRED_FOOT_HEIGHT = 0.15
 FEET_PHASE_STD = 0.06
 GAIT_PERIOD = 0.70
+COMMAND_RESAMPLE_INTERVAL = 500
 
 # Domain randomization.
+PUSH_ENABLE = True
+PUSH_INTERVAL_RANGE = (5.0, 10.0)
+PUSH_MAGNITUDE_RANGE = (0.05, 1.0)
+
 RANDOMIZE_ARMATURE = True
 ARMATURE_NOMINAL = 0.001
 ARMATURE_MIN = 0.0001
 ARMATURE_MAX = 0.005
+
+# Model parameter randomization (mirrors robot_learning/src/jax/randomize.py).
+RANDOMIZE_FLOOR_FRICTION = False
+FLOOR_FRICTION_RANGE = (0.4, 1.0)
+
+RANDOMIZE_LINK_MASSES = False
+LINK_MASS_RANGE = (0.9, 1.1)
+
+RANDOMIZE_TORSO_MASS = False
+TORSO_MASS_RANGE = (-0.5, 0.5)
+
+RANDOMIZE_QPOS0 = False
+QPOS0_JITTER_RANGE = (-0.1, 0.1)
+
+RANDOMIZE_BODY_IPOS = False
+BODY_IPOS_MIN = (-0.05, -0.02, -0.005)
+BODY_IPOS_MAX = (0.05, 0.02, 0.005)
+
+RANDOMIZE_ACTUATOR_GAINS = False
+ACTUATOR_GAIN_RANGE = (0.9, 1.1)
 
 # Normalized actions in [-1, 1] map to these joint-position offsets around the
 # XML home pose. Each tuple is (negative_action_offset, positive_action_offset).

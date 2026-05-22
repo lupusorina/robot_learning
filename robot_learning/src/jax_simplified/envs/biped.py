@@ -57,6 +57,9 @@ class BipedSim:
         contact_schedule_matching_steps: jax.Array
         swing_peak: jax.Array
         step_count: jax.Array
+        command_step: jax.Array
+        push_step: jax.Array
+        push_interval_steps: jax.Array
         reward: jax.Array
         reward_terms: dict
         terminated: jax.Array
@@ -81,20 +84,15 @@ class BipedSim:
         self.dt = self.ctrl_dt
 
         self._mjx_model = mujoco.mjx.put_model(self._model)
-        self._dof_armature_tree_key = self._find_dof_armature_tree_key()
+        self._mjx_tree_keys = self._find_mjx_model_tree_keys()
+        self._torso_body_id = self._model.body(robot_config.ROOT_BODY).id
         self._init_q = jnp.array(self._model.keyframe("home").qpos)
         self._default_q_joints = jnp.array(self._model.keyframe("home").qpos[7:])
-
-        if robot_config.RANDOMIZE_ARMATURE:
-            print(
-                "Domain randomization: actuator armature enabled; "
-                f"nominal={robot_config.ARMATURE_NOMINAL}, "
-                f"range=U({robot_config.ARMATURE_MIN}, {robot_config.ARMATURE_MAX}), "
-                "sampled per environment and per non-root joint."
-            )
+        self._print_domain_randomization_config()
 
         self.max_episode_steps = 1000
         self.history_len = robot_config.HISTORY_LEN
+        self._command_resample_interval = robot_config.COMMAND_RESAMPLE_INTERVAL
 
         # Constants.
         self._base_height_target = float(robot_config.DESIRED_HEIGHT)
@@ -279,32 +277,158 @@ class BipedSim:
         dist = data.contact.dist[idx] * mask[idx]
         return dist < 0
 
-    def _find_dof_armature_tree_key(self) -> str:
-        """Find the pytree path used by replace_pytree for mjx.Model.dof_armature."""
+    def _find_mjx_model_tree_keys(self) -> dict[str, str]:
+        """Map mjx.Model field names to BipedModel pytree path strings."""
+        field_names = (
+            "dof_armature",
+            "geom_friction",
+            "body_mass",
+            "qpos0",
+            "body_ipos",
+            "actuator_gainprm",
+            "actuator_biasprm",
+        )
         model = self.BipedModel(mjmodel=self._mjx_model)
+        keys: dict[str, str] = {}
         for path, leaf in jax.tree_util.tree_leaves_with_path(model):
             key = jax.tree_util.keystr(path)
-            if (
-                key.endswith("dof_armature")
-                and hasattr(leaf, "shape")
-                and leaf.shape == self._mjx_model.dof_armature.shape
-            ):
-                return key
-        raise RuntimeError("Could not find dof_armature in the MJX model pytree")
+            for name in field_names:
+                if key.endswith(name) and name not in keys:
+                    if hasattr(leaf, "shape") and getattr(self._mjx_model, name).shape == leaf.shape:
+                        keys[name] = key
+        missing = set(field_names) - set(keys)
+        if missing:
+            raise RuntimeError(f"Could not find mjx.Model fields in pytree: {sorted(missing)}")
+        return keys
+
+    def _print_domain_randomization_config(self) -> None:
+        rc = robot_config
+        enabled = []
+        if rc.RANDOMIZE_ARMATURE:
+            enabled.append(
+                f"armature U({rc.ARMATURE_MIN}, {rc.ARMATURE_MAX}) per joint"
+            )
+        if rc.RANDOMIZE_FLOOR_FRICTION:
+            enabled.append(f"floor friction U{rc.FLOOR_FRICTION_RANGE}")
+        if rc.RANDOMIZE_LINK_MASSES:
+            enabled.append(f"link masses *U{rc.LINK_MASS_RANGE}")
+        if rc.RANDOMIZE_TORSO_MASS:
+            enabled.append(f"torso mass +U{rc.TORSO_MASS_RANGE}")
+        if rc.RANDOMIZE_QPOS0:
+            enabled.append(f"qpos0 jitter U{rc.QPOS0_JITTER_RANGE}")
+        if rc.RANDOMIZE_BODY_IPOS:
+            enabled.append(f"torso COM offset U{rc.BODY_IPOS_MIN}..{rc.BODY_IPOS_MAX}")
+        if rc.RANDOMIZE_ACTUATOR_GAINS:
+            enabled.append(f"actuator Kp/Kd *U{rc.ACTUATOR_GAIN_RANGE}")
+        if enabled:
+            print("Domain randomization enabled (sampled per environment):")
+            for item in enabled:
+                print(f"  - {item}")
 
     def get_randomized_model_params(self, rng: jax.Array) -> dict[str, jax.Array]:
-        ''' Get the randomized model parameters. '''
-        if not robot_config.RANDOMIZE_ARMATURE:
-            return {}
-        dof_armature = self._mjx_model.dof_armature
-        randomized_armature = jax.random.uniform(
-            rng,
-            shape=(self._model.nv - 6,),
-            minval=robot_config.ARMATURE_MIN,
-            maxval=robot_config.ARMATURE_MAX,
-        )
-        dof_armature = dof_armature.at[6:].set(randomized_armature)
-        return {self._dof_armature_tree_key: dof_armature}
+        ''' Sample per-environment model parameters for domain randomization. '''
+        rc = robot_config
+        updates: dict[str, jax.Array] = {}
+        nominal = self._mjx_model
+        n_joints = self._model.nq - 7
+
+        if rc.RANDOMIZE_ARMATURE:
+            rng, key = jax.random.split(rng)
+            dof_armature = nominal.dof_armature
+            randomized_armature = jax.random.uniform(
+                key,
+                shape=(self._model.nv - 6,),
+                minval=rc.ARMATURE_MIN,
+                maxval=rc.ARMATURE_MAX,
+            )
+            updates[self._mjx_tree_keys["dof_armature"]] = dof_armature.at[6:].set(
+                randomized_armature
+            )
+
+        if rc.RANDOMIZE_FLOOR_FRICTION:
+            rng, key = jax.random.split(rng)
+            friction = jax.random.uniform(
+                key,
+                minval=rc.FLOOR_FRICTION_RANGE[0],
+                maxval=rc.FLOOR_FRICTION_RANGE[1],
+            )
+            updates[self._mjx_tree_keys["geom_friction"]] = nominal.geom_friction.at[
+                self._floor_geom_id, 0
+            ].set(friction)
+
+        body_mass = nominal.body_mass
+        if rc.RANDOMIZE_LINK_MASSES:
+            rng, key = jax.random.split(rng)
+            dmass = jax.random.uniform(
+                key,
+                shape=(nominal.nbody,),
+                minval=rc.LINK_MASS_RANGE[0],
+                maxval=rc.LINK_MASS_RANGE[1],
+            )
+            body_mass = body_mass * dmass
+
+        if rc.RANDOMIZE_TORSO_MASS:
+            rng, key = jax.random.split(rng)
+            dmass = jax.random.uniform(
+                key,
+                minval=rc.TORSO_MASS_RANGE[0],
+                maxval=rc.TORSO_MASS_RANGE[1],
+            )
+            body_mass = body_mass.at[self._torso_body_id].set(
+                body_mass[self._torso_body_id] + dmass
+            )
+
+        if rc.RANDOMIZE_LINK_MASSES or rc.RANDOMIZE_TORSO_MASS:
+            updates[self._mjx_tree_keys["body_mass"]] = body_mass
+
+        if rc.RANDOMIZE_QPOS0:
+            rng, key = jax.random.split(rng)
+            qpos0 = nominal.qpos0
+            jitter = jax.random.uniform(
+                key,
+                shape=(n_joints,),
+                minval=rc.QPOS0_JITTER_RANGE[0],
+                maxval=rc.QPOS0_JITTER_RANGE[1],
+            )
+            updates[self._mjx_tree_keys["qpos0"]] = qpos0.at[7:].set(qpos0[7:] + jitter)
+
+        if rc.RANDOMIZE_BODY_IPOS:
+            rng, key = jax.random.split(rng)
+            com_offset = jax.random.uniform(
+                key,
+                shape=(3,),
+                minval=jnp.array(rc.BODY_IPOS_MIN),
+                maxval=jnp.array(rc.BODY_IPOS_MAX),
+            )
+            body_ipos = nominal.body_ipos
+            updates[self._mjx_tree_keys["body_ipos"]] = body_ipos.at[self._torso_body_id].set(
+                body_ipos[self._torso_body_id] + com_offset
+            )
+
+        if rc.RANDOMIZE_ACTUATOR_GAINS:
+            actuator_gainprm = nominal.actuator_gainprm
+            actuator_biasprm = nominal.actuator_biasprm
+            for i in range(self._model.nu):
+                kp_nominal = nominal.actuator_gainprm[i, 0]
+                kd_nominal = nominal.actuator_biasprm[i, 2]
+                rng, key_kp, key_kd = jax.random.split(rng, 3)
+                dkp = jax.random.uniform(
+                    key_kp,
+                    minval=rc.ACTUATOR_GAIN_RANGE[0],
+                    maxval=rc.ACTUATOR_GAIN_RANGE[1],
+                )
+                dkd = jax.random.uniform(
+                    key_kd,
+                    minval=rc.ACTUATOR_GAIN_RANGE[0],
+                    maxval=rc.ACTUATOR_GAIN_RANGE[1],
+                )
+                actuator_gainprm = actuator_gainprm.at[i, 0].set(kp_nominal * dkp)
+                actuator_biasprm = actuator_biasprm.at[i, 1].set(-kp_nominal * dkp)
+                actuator_biasprm = actuator_biasprm.at[i, 2].set(kd_nominal * dkd)
+            updates[self._mjx_tree_keys["actuator_gainprm"]] = actuator_gainprm
+            updates[self._mjx_tree_keys["actuator_biasprm"]] = actuator_biasprm
+
+        return updates
 
     def make_model(self, randomized_params: dict[str, jax.Array] = {}) -> BipedModel:
         ''' Make the model. '''
@@ -329,10 +453,10 @@ class BipedSim:
             jnp.zeros(3),
             jnp.hstack([lin_vel_x, lin_vel_y, ang_vel_yaw]),
         )
-        
+
     def reset(self, model: BipedModel, rng: jax.Array) -> BipedState:
         ''' Reset the model. '''
-        qpos = self._init_q
+        qpos = self._init_q.at[7:].set(model.mjmodel.qpos0[7:])
         qvel = jnp.zeros(model.mjmodel.nv)
 
         # Initialize the position.
@@ -361,6 +485,14 @@ class BipedSim:
         base_phase = jax.random.uniform(key, (), minval=-jnp.pi, maxval=jnp.pi)
         phase = jnp.fmod(jnp.array([base_phase, base_phase + jnp.pi]) + jnp.pi, 2 * jnp.pi) - jnp.pi
         phase_dt = jnp.array([2 * jnp.pi * self.ctrl_dt / robot_config.GAIT_PERIOD])
+
+        rng, push_rng = jax.random.split(rng)
+        push_interval = jax.random.uniform(
+            push_rng,
+            minval=robot_config.PUSH_INTERVAL_RANGE[0],
+            maxval=robot_config.PUSH_INTERVAL_RANGE[1],
+        )
+        push_interval_steps = jnp.round(push_interval / self.ctrl_dt).astype(jnp.int32)
 
         # Initialize the observation.
         rng, key_obs = jax.random.split(rng)
@@ -394,6 +526,9 @@ class BipedSim:
             contact_schedule_matching_steps=jnp.zeros(()),
             swing_peak=jnp.zeros(2),
             step_count=jnp.array(0, dtype=jnp.int32),
+            command_step=jnp.array(0, dtype=jnp.int32),
+            push_step=jnp.array(0, dtype=jnp.int32),
+            push_interval_steps=push_interval_steps,
             reward=jnp.array(0.0),
             reward_terms=reward_terms,
             terminated=jnp.array(False),
@@ -514,6 +649,23 @@ class BipedSim:
 
         data = state.mjdata
 
+        rng, push1_rng, push2_rng, rng = jax.random.split(rng, 4)
+        push_theta = jax.random.uniform(push1_rng, maxval=2 * jnp.pi)
+        push_magnitude = jax.random.uniform(
+            push2_rng,
+            minval=robot_config.PUSH_MAGNITUDE_RANGE[0],
+            maxval=robot_config.PUSH_MAGNITUDE_RANGE[1],
+        )
+        push = jnp.array([jnp.cos(push_theta), jnp.sin(push_theta)])
+        push *= (
+            jnp.mod(state.push_step + 1, state.push_interval_steps)
+            == 0
+        )
+        push *= robot_config.PUSH_ENABLE
+        qvel = data.qvel
+        qvel = qvel.at[:2].set(push * push_magnitude + qvel[:2])
+        data = data.replace(qvel=qvel)
+
         def sim_step(d, _):
             d = d.replace(ctrl=motor_targets)
             d = mujoco.mjx.step(model.mjmodel, d)
@@ -561,8 +713,23 @@ class BipedSim:
         )
         priv_hist = RingBuffer.push(state.privileged_obs_history, current_priv)
 
+        command_step = state.command_step + 1
+        rng, cmd_rng = jax.random.split(rng)
+        resample_command = command_step > self._command_resample_interval
+        command = jnp.where(
+            resample_command,
+            self._sample_command(cmd_rng),
+            state.command,
+        )
+        command_step = jnp.where(
+            (terminated | truncated) | resample_command,
+            0,
+            command_step,
+        )
+
         return state.replace(
             mjdata=data,
+            command=command,
             last_last_act=state.last_act,
             last_act=action,
             phase=phase,
@@ -571,6 +738,8 @@ class BipedSim:
             contact_schedule_matching_steps=contact_schedule_matching_steps,
             swing_peak=swing_peak,
             step_count=step_count,
+            command_step=command_step,
+            push_step=state.push_step + 1,
             reward=reward,
             reward_terms=reward_terms,
             terminated=terminated,
